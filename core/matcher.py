@@ -2,7 +2,6 @@ import sqlite3
 from dataclasses import dataclass, field
 
 import imagehash
-import numpy as np
 
 import config
 from core.hasher import str_to_hash
@@ -27,49 +26,48 @@ class MatchResult:
 
 class CardMatcher:
     def __init__(self, db_path: str = config.DB_PATH):
-        self._conn = sqlite3.connect(db_path, check_same_thread=False)
-        self._conn.row_factory = sqlite3.Row
+        conn = sqlite3.connect(db_path)
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            "SELECT id, name, set_name, number, rarity, phash FROM cards"
+        ).fetchall()
+        conn.close()
+
+        # Pre-parse all hashes once at startup; _cards is immutable after this
+        self._cards: list[tuple[imagehash.ImageHash, CardCandidate]] = []
+        for row in rows:
+            try:
+                h = str_to_hash(row["phash"])
+            except Exception:
+                continue
+            self._cards.append((h, CardCandidate(
+                card_id=row["id"],
+                name=row["name"],
+                set_name=row["set_name"],
+                number=row["number"],
+                rarity=row["rarity"],
+                hamming_dist=0,
+            )))
+
         self.last_closest_dist: int = 999
 
     def find_matches(self, query_hash: imagehash.ImageHash) -> MatchResult | None:
-        """
-        Full-table hamming scan. Returns a MatchResult with the best match as
-        primary and all other matches within threshold as candidates.
-        Returns None if no match is found within the threshold.
-        """
-        rows = self._conn.execute(
-            "SELECT id, name, set_name, number, rarity, phash FROM cards"
-        ).fetchall()
-
         hits: list[CardCandidate] = []
         closest_dist = 999
-        closest_candidate: CardCandidate | None = None
 
-        for row in rows:
-            try:
-                db_hash = str_to_hash(row["phash"])
-                dist = int(query_hash - db_hash)
-            except Exception:
-                continue
+        for db_hash, card in self._cards:
+            dist = int(query_hash - db_hash)
 
             if dist < closest_dist:
                 closest_dist = dist
-                closest_candidate = CardCandidate(
-                    card_id=row["id"],
-                    name=row["name"],
-                    set_name=row["set_name"],
-                    number=row["number"],
-                    rarity=row["rarity"],
-                    hamming_dist=dist,
-                )
 
             if dist <= config.MATCH_HAMMING_THRESHOLD:
                 hits.append(CardCandidate(
-                    card_id=row["id"],
-                    name=row["name"],
-                    set_name=row["set_name"],
-                    number=row["number"],
-                    rarity=row["rarity"],
+                    card_id=card.card_id,
+                    name=card.name,
+                    set_name=card.set_name,
+                    number=card.number,
+                    rarity=card.rarity,
                     hamming_dist=dist,
                 ))
 
@@ -82,4 +80,4 @@ class CardMatcher:
         return MatchResult(primary=hits[0], candidates=hits[1:], closest_dist=closest_dist)
 
     def close(self) -> None:
-        self._conn.close()
+        pass  # nothing to close — DB connection released at startup

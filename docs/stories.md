@@ -117,6 +117,20 @@
 
 ---
 
+### E01-US09 — Unique scan ID and capture image per scan
+**As a** collector,
+**I want** every scan to have a unique ID that ties together the log entry and the captured image,
+**So that** I can later retrieve exactly what the camera saw for any logged scan (e.g., for manual remapping).
+
+**Acceptance criteria:**
+- A UUID (`scan_token`) is generated at scan time and persisted in the `scan_log` table alongside the other scan fields
+- At scan time, the cropped card image is saved to `db/captures/{scan_token}.jpg`
+- The capture image is saved regardless of whether the match succeeded or not
+- The `scan_token` column is added to the existing `scan_log` schema; existing rows without a token are left as-is (nullable)
+- *Prerequisite for E04-US02 (manual remap)*
+
+---
+
 ## E02 — Reliability & Accuracy
 
 ### E02-US01 — Handle unrecognized cards gracefully
@@ -228,6 +242,19 @@
 
 ---
 
+### E02-US10 — 180° rotation fallback for fixed-slot scanning
+**As a** collector using a card slot that accepts cards in either orientation,
+**I want** the app to automatically try the card rotated 180° if the first match attempt fails,
+**So that** I don't have to worry about which way the card faces when I drop it in.
+
+**Acceptance criteria:**
+- If the initial hash match returns no result within the threshold, the crop is rotated 180° and matched again
+- If the rotated match succeeds, it is used as the result — no extra log noise or warning
+- If neither orientation matches, the normal "no match" failure behaviour applies
+- The rotation attempt adds no perceptible delay (hash comparison is fast enough in-memory)
+
+---
+
 ### E02-US09 — Visual feedback inside the scannable area
 **As a** collector using a defined scannable area,
 **I want** the ROI overlay to change appearance when a card is detected inside it,
@@ -295,3 +322,53 @@
 - On confirmation, the log entry's primary result is updated to the selected candidate, its price is recorded, and the entry is marked as "corrected"
 - The session total value updates to reflect the corrected price
 - The user can dismiss the detail view without making a change
+
+---
+
+## E04 — Manual Operations & Data Quality
+
+### E04-US01 — Store card reference images locally
+**As a** developer / first-time setup user,
+**I want** `build_db.py` to download and store the reference image for each card,
+**So that** the app can display card thumbnails in the manual remap dialog without a network request.
+
+**Acceptance criteria:**
+- `build_db.py` downloads the small image for each card and saves it to `db/images/{card_id}.png`
+- Downloads run in parallel (thread pool) alongside hash computation; overall build time should not increase significantly
+- Script is resumable — cards whose image file already exists on disk are skipped
+- If an individual image download fails, the card record is still written with a null or empty `image_path`; the failure is counted in the completion summary
+- *Prerequisite for E04-US02 (manual remap thumbnails)*
+
+---
+
+### E04-US02 — Right-click → Get Price
+**As a** collector,
+**I want** to right-click any scan log row and request a fresh price fetch,
+**So that** I can recover a price for entries where the initial fetch failed or timed out.
+
+**Acceptance criteria:**
+- Right-clicking a log row shows a context menu with a "Get Price" option
+- Selecting it triggers a background price fetch for that row's card ID
+- While the fetch is in progress, the price column shows a loading indicator (e.g., "…")
+- On success, the price column updates with the new value and the DB record is updated
+- On failure, the price column reverts to "N/A" and the error is logged to the debug log
+- "Get Price" is available on all rows regardless of whether a price is already present (allows refresh)
+
+---
+
+### E04-US03 — Right-click → Manual Remap
+**As a** collector,
+**I want** to right-click a scan log row and manually pick the correct card from a list of close matches,
+**So that** I can correct misidentified scans using the actual captured image as a reference.
+
+**Acceptance criteria:**
+- Right-clicking a log row shows a context menu with a "Remap Card" option
+- Selecting it opens a remap dialog showing:
+  - The captured crop image saved at scan time (from E01-US09), identified by `scan_token`
+  - A scrollable list of the top N closest DB matches, each showing: card thumbnail (from E04-US01), card name, set, number, rarity, and hamming distance
+  - N is configurable in-app (default 100) via a control visible in the dialog or settings
+- The user selects the correct card from the list and confirms
+- On confirmation, the log row is updated with the selected card's details and marked as "corrected"
+- A price fetch is triggered immediately after remapping; the price column updates when it returns
+- The user can dismiss the dialog without making a change
+- *Depends on E01-US09 (capture images) and E04-US01 (card reference images)*

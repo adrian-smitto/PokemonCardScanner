@@ -45,11 +45,16 @@ BEEP_DURATION_MS = 200
 # Paths
 DB_PATH = "db/cards.db"
 SCAN_LOG_PATH = "db/scan_log.db"
+CAPTURES_DIR = "db/captures"
+IMAGES_DIR = "db/images"
+
+# Manual remap
+REMAP_TOP_N = 100   # default number of candidates shown in the remap dialog
 
 # Pokemon TCG API
 POKEMONTCG_API_KEY = os.getenv("POKEMONTCG_API_KEY", "")
 POKEMONTCG_BASE_URL = "https://api.pokemontcg.io/v2"
-API_TIMEOUT_SECONDS = 8
+API_TIMEOUT_SECONDS = 20
 
 # UI
 UI_FEED_WIDTH = 640

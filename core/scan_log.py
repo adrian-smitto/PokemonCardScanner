@@ -19,6 +19,7 @@ class ScanRecord:
     scanned_at: str = ""
     id: int | None = None
     is_corrected: bool = False
+    scan_token: str | None = None
 
     def __post_init__(self):
         if not self.scanned_at:
@@ -37,7 +38,8 @@ CREATE TABLE IF NOT EXISTS scan_log (
     rarity       TEXT,
     market_price REAL,
     hamming_dist INTEGER NOT NULL,
-    is_corrected INTEGER NOT NULL DEFAULT 0
+    is_corrected INTEGER NOT NULL DEFAULT 0,
+    scan_token   TEXT
 );
 """
 
@@ -63,19 +65,24 @@ class ScanLogger:
         self._conn.execute(_CREATE_SCAN_LOG)
         self._conn.execute(_CREATE_CANDIDATES)
         self._conn.commit()
+        try:
+            self._conn.execute("ALTER TABLE scan_log ADD COLUMN scan_token TEXT")
+            self._conn.commit()
+        except sqlite3.OperationalError:
+            pass  # column already exists
 
     def log_scan(self, record: ScanRecord) -> int:
         """Insert scan and its candidates. Returns the new scan_log row id."""
         cur = self._conn.execute(
             """INSERT INTO scan_log
                (session_id, scanned_at, card_id, card_name, set_name, number,
-                rarity, market_price, hamming_dist, is_corrected)
-               VALUES (?,?,?,?,?,?,?,?,?,?)""",
+                rarity, market_price, hamming_dist, is_corrected, scan_token)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 record.session_id, record.scanned_at, record.card_id,
                 record.card_name, record.set_name, record.number,
                 record.rarity, record.market_price, record.hamming_dist,
-                int(record.is_corrected),
+                int(record.is_corrected), record.scan_token,
             ),
         )
         scan_id = cur.lastrowid
@@ -148,6 +155,11 @@ class ScanLogger:
                     row["rarity"], row["market_price"],
                     row["hamming_dist"], row["is_corrected"],
                 ])
+
+    def get_scan(self, scan_id: int) -> sqlite3.Row | None:
+        return self._conn.execute(
+            "SELECT * FROM scan_log WHERE id = ?", (scan_id,)
+        ).fetchone()
 
     def close(self) -> None:
         self._conn.close()

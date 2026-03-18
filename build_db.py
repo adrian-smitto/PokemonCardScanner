@@ -192,6 +192,50 @@ def download_and_hash(card: dict, session: requests.Session) -> dict | None:
         return None
 
 
+def _download_image(args: tuple) -> bool:
+    """Download a single card image if not already on disk. Returns True on success."""
+    import io
+    card_id, image_url, session = args
+    local_path = _image_path(card_id)
+    if os.path.exists(local_path):
+        return True
+    try:
+        resp = session.get(image_url, timeout=15)
+        resp.raise_for_status()
+        os.makedirs(IMAGE_CACHE_DIR, exist_ok=True)
+        img = Image.open(io.BytesIO(resp.content)).convert("RGB")
+        img.save(local_path, "JPEG", quality=85)
+        return True
+    except Exception:
+        return False
+
+
+def download_images(conn: sqlite3.Connection, session: requests.Session) -> None:
+    """Download card images for all DB rows that are missing a local image file."""
+    rows = conn.execute("SELECT id, image_url FROM cards").fetchall()
+    missing = [(row[0], row[1], session) for row in rows
+               if not os.path.exists(_image_path(row[0]))]
+
+    if not missing:
+        print("All card images already downloaded.")
+        return
+
+    print(f"\nDownloading {len(missing)} card images...")
+    succeeded = 0
+    failed = 0
+    with tqdm(total=len(missing), unit="img", desc="Images") as pbar:
+        with ThreadPoolExecutor(max_workers=WORKERS) as executor:
+            futures = {executor.submit(_download_image, args): args for args in missing}
+            for future in as_completed(futures):
+                if future.result():
+                    succeeded += 1
+                else:
+                    failed += 1
+                pbar.update(1)
+
+    print(f"Images done. Downloaded: {succeeded}  Failed: {failed}")
+
+
 def build_database(api_key: str) -> None:
     os.makedirs("db", exist_ok=True)
     conn = sqlite3.connect(DB_PATH)
@@ -209,34 +253,35 @@ def build_database(api_key: str) -> None:
 
     if not to_process:
         print("Database is up to date.")
-        conn.close()
-        return
+    else:
+        processed = 0
+        failed = 0
+        batch = []
 
-    processed = 0
-    failed = 0
-    batch = []
+        with tqdm(total=len(to_process), unit="card", desc="Building DB") as pbar:
+            with ThreadPoolExecutor(max_workers=WORKERS) as executor:
+                futures = {executor.submit(download_and_hash, c, session): c for c in to_process}
+                for future in as_completed(futures):
+                    result = future.result()
+                    if result:
+                        batch.append(result)
+                        processed += 1
+                    else:
+                        failed += 1
+                    pbar.update(1)
 
-    with tqdm(total=len(to_process), unit="card", desc="Building DB") as pbar:
-        with ThreadPoolExecutor(max_workers=WORKERS) as executor:
-            futures = {executor.submit(download_and_hash, c, session): c for c in to_process}
-            for future in as_completed(futures):
-                result = future.result()
-                if result:
-                    batch.append(result)
-                    processed += 1
-                else:
-                    failed += 1
-                pbar.update(1)
+                    if len(batch) >= BATCH_SIZE:
+                        _insert_batch(conn, batch)
+                        batch = []
 
-                if len(batch) >= BATCH_SIZE:
-                    _insert_batch(conn, batch)
-                    batch = []
+        if batch:
+            _insert_batch(conn, batch)
 
-    if batch:
-        _insert_batch(conn, batch)
+        print(f"\nDone. Processed: {processed}  Skipped: {len(existing)}  Failed: {failed}")
 
+    # Always ensure images are downloaded (independent of hash DB status)
+    download_images(conn, session)
     conn.close()
-    print(f"\nDone. Processed: {processed}  Skipped: {len(existing)}  Failed: {failed}")
 
 
 def _insert_batch(conn: sqlite3.Connection, batch: list[dict]) -> None:

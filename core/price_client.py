@@ -1,5 +1,6 @@
 from dataclasses import dataclass
 from datetime import datetime, timezone
+import time
 import requests
 import config
 
@@ -26,27 +27,32 @@ class PriceClient:
 
     def fetch_price(self, card_id: str) -> PriceResult:
         url = f"{config.POKEMONTCG_BASE_URL}/cards/{card_id}"
-        try:
-            resp = self._session.get(url, timeout=config.API_TIMEOUT_SECONDS)
-            resp.raise_for_status()
-            data = resp.json().get("data", {})
-            market, low, high = self._extract_prices(data.get("tcgplayer", {}).get("prices", {}))
-            return PriceResult(
-                card_id=card_id,
-                market_price=market,
-                low_price=low,
-                high_price=high,
-                fetched_at=datetime.now(timezone.utc).isoformat(),
-            )
-        except Exception as e:
-            return PriceResult(
-                card_id=card_id,
-                market_price=None,
-                low_price=None,
-                high_price=None,
-                fetched_at=datetime.now(timezone.utc).isoformat(),
-                error=str(e),
-            )
+        last_error = None
+        for attempt in range(2):  # one retry on failure
+            if attempt > 0:
+                time.sleep(2)
+            try:
+                resp = self._session.get(url, timeout=config.API_TIMEOUT_SECONDS)
+                resp.raise_for_status()
+                data = resp.json().get("data", {})
+                market, low, high = self._extract_prices(data.get("tcgplayer", {}).get("prices", {}))
+                return PriceResult(
+                    card_id=card_id,
+                    market_price=market,
+                    low_price=low,
+                    high_price=high,
+                    fetched_at=datetime.now(timezone.utc).isoformat(),
+                )
+            except Exception as e:
+                last_error = e
+        return PriceResult(
+            card_id=card_id,
+            market_price=None,
+            low_price=None,
+            high_price=None,
+            fetched_at=datetime.now(timezone.utc).isoformat(),
+            error=str(last_error),
+        )
 
     def _extract_prices(self, prices: dict) -> tuple[float | None, float | None, float | None]:
         """Try price variants in order, return (market, low, high)."""

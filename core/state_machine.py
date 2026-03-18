@@ -1,3 +1,4 @@
+import os
 import queue
 import time
 import uuid
@@ -66,6 +67,8 @@ class ScanStateMachine:
 
         self._state = ScanState.IDLE
         self._stable_hashes: list = []
+        self._stable_crops: list = []
+        self._last_crop: Image.Image | None = None
         self._last_contour: np.ndarray | None = None
         self._cooldown_start: float = 0.0
         self._cooldown_hash = None
@@ -77,6 +80,10 @@ class ScanStateMachine:
     @property
     def state(self) -> ScanState:
         return self._state
+
+    @property
+    def matcher(self) -> CardMatcher:
+        return self._matcher
 
     def process(self, frame: np.ndarray) -> tuple[np.ndarray, np.ndarray | None]:
         """
@@ -124,6 +131,7 @@ class ScanStateMachine:
                 self._lost_frames = 0
                 self._last_contour = contour
                 self._stable_hashes = []
+                self._stable_crops = []
                 self._transition(ScanState.STABILIZING)
 
         elif self._state == ScanState.STABILIZING:
@@ -132,6 +140,7 @@ class ScanStateMachine:
                 if self._lost_frames >= config.LOST_FRAMES_THRESHOLD:
                     self._status("Card removed during stabilization", "dim")
                     self._stable_hashes = []
+                    self._stable_crops = []
                     self._lost_frames = 0
                     self._transition(ScanState.IDLE)
             else:
@@ -148,10 +157,13 @@ class ScanStateMachine:
                         drift = hamming(h, self._stable_hashes[-1])
                         if drift > config.STABILIZE_HASH_THRESHOLD:
                             self._stable_hashes = [h]
+                            self._stable_crops = [cropped]
                         else:
                             self._stable_hashes.append(h)
+                            self._stable_crops.append(cropped)
                     else:
                         self._stable_hashes.append(h)
+                        self._stable_crops.append(cropped)
                 except Exception:
                     pass
 
@@ -163,9 +175,22 @@ class ScanStateMachine:
                 if len(self._stable_hashes) >= config.STABILIZE_FRAMES:
                     self._status("Stable — running hash match...", "info")
                     canonical = self._canonical_hash(self._stable_hashes)
+                    try:
+                        canonical_idx = self._stable_hashes.index(canonical)
+                        self._last_crop = self._stable_crops[canonical_idx]
+                    except (ValueError, IndexError):
+                        self._last_crop = self._stable_crops[-1] if self._stable_crops else None
+                    self._stable_crops = []
                     self._transition(ScanState.MATCHING)
+                    # Compute 180° fallback hash in case card was dropped upside-down
+                    hash_180 = None
+                    if self._last_crop is not None:
+                        try:
+                            hash_180 = compute_phash(self._last_crop.rotate(180))
+                        except Exception:
+                            pass
                     self._match_future = self._executor.submit(
-                        self._matcher.find_matches, canonical
+                        self._matcher.find_matches, canonical, hash_180
                     )
 
         elif self._state == ScanState.MATCHING:
@@ -224,6 +249,16 @@ class ScanStateMachine:
                     )
                     self._last_card_id = result.primary.card_id
                     self.result_queue.put(scan_result)
+
+                    # Save capture image
+                    if self._last_crop is not None:
+                        os.makedirs(config.CAPTURES_DIR, exist_ok=True)
+                        capture_path = os.path.join(config.CAPTURES_DIR, f"{scan_token}.jpg")
+                        try:
+                            self._last_crop.save(capture_path)
+                        except Exception:
+                            pass
+
                     audio.play_card_scanned()
 
                     # Kick off price fetch in background — result arrives via price_update_queue

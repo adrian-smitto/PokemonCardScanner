@@ -51,7 +51,15 @@ class CardMatcher:
 
         self.last_closest_dist: int = 999
 
-    def find_matches(self, query_hash: imagehash.ImageHash) -> MatchResult | None:
+    def find_matches(self, query_hash: imagehash.ImageHash,
+                     fallback_hash: imagehash.ImageHash | None = None) -> MatchResult | None:
+        """Scan the DB with query_hash; if no match, try fallback_hash (e.g. 180° rotation)."""
+        result = self._scan(query_hash)
+        if result is None and fallback_hash is not None:
+            result = self._scan(fallback_hash)
+        return result
+
+    def _scan(self, query_hash: imagehash.ImageHash) -> MatchResult | None:
         hits: list[CardCandidate] = []
         closest_dist = 999
 
@@ -78,6 +86,22 @@ class CardMatcher:
 
         hits.sort(key=lambda c: c.hamming_dist)
         return MatchResult(primary=hits[0], candidates=hits[1:], closest_dist=closest_dist)
+
+    def find_top_n(self, query_hash, n: int = 100) -> list[CardCandidate]:
+        """Return the top-N closest cards by hamming distance, ignoring threshold."""
+        results = []
+        for db_hash, card in self._cards:
+            dist = int(query_hash - db_hash)
+            results.append(CardCandidate(
+                card_id=card.card_id,
+                name=card.name,
+                set_name=card.set_name,
+                number=card.number,
+                rarity=card.rarity,
+                hamming_dist=dist,
+            ))
+        results.sort(key=lambda c: c.hamming_dist)
+        return results[:n]
 
     def close(self) -> None:
         pass  # nothing to close — DB connection released at startup

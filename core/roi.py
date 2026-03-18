@@ -64,3 +64,27 @@ def save_roi(roi: ROI | None) -> None:
     data["roi"] = roi.to_dict() if roi else None
     with open(SETTINGS_PATH, "w") as f:
         json.dump(data, f, indent=2)
+
+
+def load_setting(key: str, default):
+    if not os.path.exists(SETTINGS_PATH):
+        return default
+    try:
+        with open(SETTINGS_PATH, "r") as f:
+            data = json.load(f)
+        return data.get(key, default)
+    except Exception:
+        return default
+
+
+def save_setting(key: str, value) -> None:
+    data = {}
+    if os.path.exists(SETTINGS_PATH):
+        try:
+            with open(SETTINGS_PATH, "r") as f:
+                data = json.load(f)
+        except Exception:
+            pass
+    data[key] = value
+    with open(SETTINGS_PATH, "w") as f:
+        json.dump(data, f, indent=2)

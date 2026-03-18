@@ -372,3 +372,51 @@
 - A price fetch is triggered immediately after remapping; the price column updates when it returns
 - The user can dismiss the dialog without making a change
 - *Depends on E01-US09 (capture images) and E04-US01 (card reference images)*
+
+---
+
+## E05 — Dual Price Sources
+
+### E05-US01 — PriceCharting API integration
+**As a** collector,
+**I want** the app to also fetch prices from PriceCharting,
+**So that** I have a second independent price reference that works even when the Pokemon TCG API is slow or down.
+
+**Acceptance criteria:**
+- A `PriceChartingClient` is implemented in `core/` and queries the PriceCharting API by card name and set name
+- The client requires a `PRICECHARTING_API_KEY` configured in `.env`; if missing, PriceCharting fetches are silently skipped
+- The client returns: `loose_price` (ungraded market value) as the primary price field, plus `error` on failure
+- If the PriceCharting API returns no matching product, the result is treated as unavailable (not an error)
+- Network errors and timeouts are caught and returned as a failed result without crashing
+- The client is independent of `PriceClient` (pokemontcg.io) — they can be called concurrently
+
+---
+
+### E05-US02 — Dual price auto-fetch with averaging
+**As a** collector,
+**I want** the app to fetch prices from both sources simultaneously after each scan and show the best available price,
+**So that** I get a more reliable and representative market value.
+
+**Acceptance criteria:**
+- After each successful card identification, both the pokemontcg.io price fetch and the PriceCharting price fetch are dispatched concurrently
+- When both prices are available, the displayed and logged price is their average
+- When only one source returns a price, that value is used directly
+- When neither source returns a price, the price shows "N/A" as before
+- The price source is indicated in the log row (e.g., "avg", "tcg", "pc", or "N/A")
+- Price arrival and display remain asynchronous — scanning is not blocked waiting for either fetch
+- The `scan_log` DB stores the final resolved price (average or single-source); individual source prices are not stored separately
+
+---
+
+### E05-US03 — Manual "Get Price" split by source
+**As a** collector,
+**I want** the right-click context menu to offer separate "Get Price" options for each price source,
+**So that** I can fetch from a specific source when I want to compare or when one source failed.
+
+**Acceptance criteria:**
+- The right-click context menu on log rows is updated to show two options: "Get Price (TCGPlayer)" and "Get Price (PriceCharting)" instead of a single "Get Price"
+- Each option triggers a background fetch from its respective source only
+- On success, the price column is updated with the new single-source value and the source indicator updates accordingly
+- On failure, the price column reverts to "N/A" for that row
+- Both options are available on all rows regardless of current price state
+- If `PRICECHARTING_API_KEY` is not configured, "Get Price (PriceCharting)" is shown but immediately returns "N/A" with a note in the debug log

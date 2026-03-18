@@ -5,11 +5,14 @@ from core.state_machine import ScanResult
 
 
 class LogPanel(tk.Frame):
-    def __init__(self, parent, on_ambiguous_click=None, **kwargs):
+    def __init__(self, parent, on_ambiguous_click=None, on_get_price=None, on_remap=None, **kwargs):
         super().__init__(parent, **kwargs)
         self._on_ambiguous_click = on_ambiguous_click
+        self._on_get_price = on_get_price
+        self._on_remap = on_remap
         self._scan_ids: list[int | None] = []   # parallel to tree rows
         self._candidate_counts: list[int] = []
+        self._scan_tokens: list[str | None] = []
         self._build()
 
     def _build(self) -> None:
@@ -39,12 +42,14 @@ class LogPanel(tk.Frame):
         vsb.pack(side="right", fill="y")
 
         self._tree.bind("<ButtonRelease-1>", self._on_click)
+        self._tree.bind("<Button-3>", self._on_right_click)
 
         self._empty_label = tk.Label(self, text="No cards scanned yet",
                                      fg="#888888", bg="white")
         self._empty_label.place(relx=0.5, rely=0.5, anchor="center")
 
-    def append(self, result: ScanResult, scan_id: int | None, candidate_count: int) -> None:
+    def append(self, result: ScanResult, scan_id: int | None, candidate_count: int,
+               *, scan_token: str | None = None) -> None:
         self._empty_label.place_forget()
 
         time_str = datetime.now().strftime("%H:%M:%S")
@@ -61,6 +66,7 @@ class LogPanel(tk.Frame):
         self._tree.see(iid)
         self._scan_ids.append(scan_id)
         self._candidate_counts.append(candidate_count)
+        self._scan_tokens.append(scan_token)
 
     def update_price(self, tree_index: int, market_price: float | None) -> None:
         """Backfill the price cell once the background fetch completes."""
@@ -90,6 +96,7 @@ class LogPanel(tk.Frame):
             self._tree.delete(iid)
         self._scan_ids = []
         self._candidate_counts = []
+        self._scan_tokens = []
         self._empty_label.place(relx=0.5, rely=0.5, anchor="center")
 
     def _on_click(self, event) -> None:
@@ -103,3 +110,35 @@ class LogPanel(tk.Frame):
         if idx < len(self._candidate_counts) and self._candidate_counts[idx] > 0:
             scan_id = self._scan_ids[idx]
             self._on_ambiguous_click(scan_id, idx)
+
+    def _on_right_click(self, event) -> None:
+        item = self._tree.identify_row(event.y)
+        if not item:
+            return
+        self._tree.selection_set(item)
+        items = list(self._tree.get_children())
+        idx = items.index(item)
+        scan_id = self._scan_ids[idx] if idx < len(self._scan_ids) else None
+        scan_token = self._scan_tokens[idx] if idx < len(self._scan_tokens) else None
+
+        menu = tk.Menu(self, tearoff=0)
+        menu.add_command(
+            label="Get Price",
+            command=lambda: self._on_get_price(scan_id, idx) if self._on_get_price else None,
+        )
+        menu.add_command(
+            label="Remap Card",
+            command=lambda: self._on_remap(scan_id, scan_token, idx) if self._on_remap else None,
+        )
+        try:
+            menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            menu.grab_release()
+
+    def update_price_loading(self, tree_index: int) -> None:
+        items = self._tree.get_children()
+        if tree_index >= len(items):
+            return
+        iid = items[tree_index]
+        vals = self._tree.item(iid, "values")
+        self._tree.item(iid, values=(vals[0], vals[1], vals[2], vals[3], vals[4], "…", vals[6]))

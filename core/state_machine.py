@@ -16,6 +16,7 @@ from core.cropper import crop_and_correct
 from core.hasher import compute_phash, hamming
 from core.matcher import CardMatcher, MatchResult
 from core.price_client import PriceClient, PriceResult
+from core.pricecharting_client import PriceChartingClient, PriceChartingResult
 from core.roi import ROI
 from core import audio
 
@@ -52,13 +53,27 @@ class PriceUpdate:
     low_price: float | None
     high_price: float | None
     price_error: str | None
+    price_source: str | None = None
+
+
+def _resolve_price(tcg: float | None, pc: float | None) -> tuple[float | None, str | None]:
+    """Combine two price sources into a single value with a source label."""
+    if tcg is not None and pc is not None:
+        return round((tcg + pc) / 2, 2), "avg"
+    if tcg is not None:
+        return tcg, "tcg"
+    if pc is not None:
+        return pc, "pc"
+    return None, None
 
 
 class ScanStateMachine:
-    def __init__(self, session_id: str, on_status=None):
+    def __init__(self, session_id: str, on_status=None,
+                 pc_client: PriceChartingClient | None = None):
         self._session_id = session_id
         self._matcher = CardMatcher()
         self._price_client = PriceClient()
+        self._pc_client = pc_client
         self._executor = ThreadPoolExecutor(max_workers=4)
         self.result_queue: queue.Queue[ScanResult] = queue.Queue()
         self.price_update_queue: queue.Queue[PriceUpdate] = queue.Queue()
@@ -73,7 +88,9 @@ class ScanStateMachine:
         self._cooldown_start: float = 0.0
         self._cooldown_hash = None
         self._match_future = None
-        self._pending_prices: list = []   # [(future, scan_token, card_name)]
+        # {scan_token: {"tcg": future, "pc": future|None, "card_name": str,
+        #               "set_name": str, "number": str}}
+        self._pending_prices: dict = {}
         self._last_card_id: str | None = None   # suppress duplicate scans
         self._lost_frames: int = 0        # consecutive frames without a contour
 
@@ -199,9 +216,39 @@ class ScanStateMachine:
                 self._match_future = None
                 if result is None:
                     closest = self._matcher.last_closest_dist
-                    self._status(f"No match found (closest dist={closest})", "error")
+                    self._status(f"No match found (closest dist={closest}) — logged as Unknown", "error")
                     audio.play_failure()
-                    self._transition(ScanState.IDLE)
+
+                    scan_token = str(uuid.uuid4())
+                    if self._last_crop is not None:
+                        os.makedirs(config.CAPTURES_DIR, exist_ok=True)
+                        try:
+                            self._last_crop.save(
+                                os.path.join(config.CAPTURES_DIR, f"{scan_token}.jpg")
+                            )
+                        except Exception:
+                            pass
+
+                    self.result_queue.put(ScanResult(
+                        scan_token=scan_token,
+                        session_id=self._session_id,
+                        card_id="",
+                        card_name="Unknown",
+                        set_name="",
+                        number="",
+                        rarity=None,
+                        market_price=None,
+                        low_price=None,
+                        high_price=None,
+                        hamming_dist=closest if closest is not None else -1,
+                        price_error=None,
+                        candidates=[],
+                    ))
+                    self._last_card_id = ""
+                    self._cooldown_start = time.monotonic()
+                    self._cooldown_hash = None
+                    self._stable_hashes = []
+                    self._transition(ScanState.COOLDOWN)
                 else:
                     if result.primary.card_id == self._last_card_id:
                         self._status("Same card — skipping", "dim")
@@ -261,11 +308,21 @@ class ScanStateMachine:
 
                     audio.play_card_scanned()
 
-                    # Kick off price fetch in background — result arrives via price_update_queue
-                    price_future = self._executor.submit(
+                    # Kick off dual price fetch in background
+                    tcg_future = self._executor.submit(
                         self._price_client.fetch_price, result.primary.card_id
                     )
-                    self._pending_prices.append((price_future, scan_token, result.primary.name))
+                    pc_future = self._executor.submit(
+                        self._pc_client.fetch_price,
+                        result.primary.name, result.primary.set_name, result.primary.number,
+                    ) if self._pc_client else None
+                    self._pending_prices[scan_token] = {
+                        "tcg": tcg_future,
+                        "pc": pc_future,
+                        "card_name": result.primary.name,
+                        "set_name": result.primary.set_name,
+                        "number": result.primary.number,
+                    }
 
                     self._cooldown_start = time.monotonic()
                     self._cooldown_hash = self._stable_hashes[-1] if self._stable_hashes else None
@@ -304,27 +361,43 @@ class ScanStateMachine:
         return annotated, contour
 
     def _drain_price_futures(self) -> None:
-        """Check all pending background price fetches and emit updates for completed ones."""
-        still_pending = []
-        for future, scan_token, card_name in self._pending_prices:
-            if not future.done():
-                still_pending.append((future, scan_token, card_name))
+        """Check pending dual price fetches; emit a PriceUpdate when both sources settle."""
+        still_pending = {}
+        for scan_token, entry in self._pending_prices.items():
+            tcg_f = entry["tcg"]
+            pc_f  = entry["pc"]
+            if not tcg_f.done() or (pc_f is not None and not pc_f.done()):
+                still_pending[scan_token] = entry
                 continue
+
             try:
-                price: PriceResult = future.result()
+                tcg_result: PriceResult = tcg_f.result()
             except Exception as e:
-                price = PriceResult(card_id="", market_price=None,
-                                    low_price=None, high_price=None, error=str(e))
-            if price.available:
-                self._status(f"Price: ${price.market_price:.2f} ({card_name})", "success")
+                tcg_result = PriceResult(card_id="", market_price=None,
+                                         low_price=None, high_price=None, error=str(e))
+
+            pc_price = None
+            if pc_f is not None:
+                try:
+                    pc_result: PriceChartingResult = pc_f.result()
+                    pc_price = pc_result.loose_price if pc_result.available else None
+                except Exception:
+                    pc_price = None
+
+            market_price, source = _resolve_price(tcg_result.market_price, pc_price)
+            card_name = entry["card_name"]
+            if market_price is not None:
+                self._status(f"Price: ${market_price:.2f} [{source}] ({card_name})", "success")
             else:
-                self._status(f"Price unavailable for {card_name}" + (f" — {price.error}" if price.error else ""), "error")
+                self._status(f"Price unavailable for {card_name}", "error")
+
             self.price_update_queue.put(PriceUpdate(
                 scan_token=scan_token,
-                market_price=price.market_price,
-                low_price=price.low_price,
-                high_price=price.high_price,
-                price_error=price.error,
+                market_price=market_price,
+                low_price=tcg_result.low_price,
+                high_price=tcg_result.high_price,
+                price_error=tcg_result.error,
+                price_source=source,
             ))
         self._pending_prices = still_pending
 

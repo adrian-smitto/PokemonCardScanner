@@ -5,10 +5,12 @@ from core.state_machine import ScanResult
 
 
 class LogPanel(tk.Frame):
-    def __init__(self, parent, on_ambiguous_click=None, on_get_price=None, on_remap=None, **kwargs):
+    def __init__(self, parent, on_ambiguous_click=None, on_get_price_tcg=None,
+                 on_get_price_pc=None, on_remap=None, **kwargs):
         super().__init__(parent, **kwargs)
         self._on_ambiguous_click = on_ambiguous_click
-        self._on_get_price = on_get_price
+        self._on_get_price_tcg = on_get_price_tcg
+        self._on_get_price_pc = on_get_price_pc
         self._on_remap = on_remap
         self._scan_ids: list[int | None] = []   # parallel to tree rows
         self._candidate_counts: list[int] = []
@@ -41,6 +43,8 @@ class LogPanel(tk.Frame):
         self._tree.pack(side="left", fill="both", expand=True)
         vsb.pack(side="right", fill="y")
 
+        self._tree.tag_configure("unknown", foreground="#888888")
+
         self._tree.bind("<ButtonRelease-1>", self._on_click)
         self._tree.bind("<Button-3>", self._on_right_click)
 
@@ -58,8 +62,10 @@ class LogPanel(tk.Frame):
         if candidate_count > 0:
             flags = f"? {candidate_count} alt{'s' if candidate_count > 1 else ''}"
 
+        is_unknown = result.card_id == ""
         iid = self._tree.insert(
             "", "end",
+            tags=("unknown",) if is_unknown else (),
             values=(time_str, result.card_name, result.set_name,
                     result.number, result.rarity or "", price_str, flags),
         )
@@ -68,13 +74,17 @@ class LogPanel(tk.Frame):
         self._candidate_counts.append(candidate_count)
         self._scan_tokens.append(scan_token)
 
-    def update_price(self, tree_index: int, market_price: float | None) -> None:
+    def update_price(self, tree_index: int, market_price: float | None,
+                     source: str | None = None) -> None:
         """Backfill the price cell once the background fetch completes."""
         items = self._tree.get_children()
         if tree_index >= len(items):
             return
         iid = items[tree_index]
-        price_str = f"${market_price:.2f}" if market_price is not None else "N/A"
+        if market_price is not None:
+            price_str = f"${market_price:.2f} {source}" if source else f"${market_price:.2f}"
+        else:
+            price_str = "N/A"
         vals = self._tree.item(iid, "values")
         self._tree.item(iid, values=(vals[0], vals[1], vals[2], vals[3], vals[4], price_str, vals[6]))
 
@@ -121,11 +131,17 @@ class LogPanel(tk.Frame):
         scan_id = self._scan_ids[idx] if idx < len(self._scan_ids) else None
         scan_token = self._scan_tokens[idx] if idx < len(self._scan_tokens) else None
 
+        import config
         menu = tk.Menu(self, tearoff=0)
         menu.add_command(
-            label="Get Price",
-            command=lambda: self._on_get_price(scan_id, idx) if self._on_get_price else None,
+            label="Get Price (TCGPlayer)",
+            command=lambda: self._on_get_price_tcg(scan_id, idx) if self._on_get_price_tcg else None,
         )
+        if config.PRICECHARTING_ENABLED:
+            menu.add_command(
+                label="Get Price (PriceCharting)",
+                command=lambda: self._on_get_price_pc(scan_id, idx) if self._on_get_price_pc else None,
+            )
         menu.add_command(
             label="Remap Card",
             command=lambda: self._on_remap(scan_id, scan_token, idx) if self._on_remap else None,
@@ -134,6 +150,16 @@ class LogPanel(tk.Frame):
             menu.tk_popup(event.x_root, event.y_root)
         finally:
             menu.grab_release()
+
+    def get_unpriced_rows(self) -> list[tuple[int, int]]:
+        """Return (scan_id, tree_index) for every row currently showing N/A."""
+        result = []
+        for idx, iid in enumerate(self._tree.get_children()):
+            vals = self._tree.item(iid, "values")
+            price_str = vals[5] if len(vals) > 5 else ""
+            if price_str == "N/A" and idx < len(self._scan_ids) and self._scan_ids[idx] is not None:
+                result.append((self._scan_ids[idx], idx))
+        return result
 
     def update_price_loading(self, tree_index: int) -> None:
         items = self._tree.get_children()

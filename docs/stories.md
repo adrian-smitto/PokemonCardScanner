@@ -146,6 +146,22 @@
 
 ---
 
+### E02-US11 — Log unmatched scans as unknown for later remapping
+**As a** collector,
+**I want** cards that were scanned but not matched to still appear in the log as "Unknown",
+**So that** I can remap them manually after the scanning session without losing the captured image.
+
+**Acceptance criteria:**
+- When a card is detected and stabilized but no hash match is found, it is logged as an "Unknown" entry (card name = "Unknown", card ID = null, price = "N/A")
+- The capture image is saved to `db/captures/{scan_token}.jpg` as normal so the remap dialog can show it
+- The log row is visually distinct from matched rows (e.g. shown in a muted or italic style)
+- The failure beep still plays
+- Right-clicking the unknown row shows "Remap Card" in the context menu, which opens the remap dialog with the top N closest candidates
+- On successful remap, the row updates with the selected card's details and a price fetch is triggered
+- The duplicate suppression cooldown still applies — the same unmatched card cannot flood the log
+
+---
+
 ### E02-US02 — Handle price API failures gracefully
 **As a** collector,
 **I want** the scan to still be logged even if the price lookup fails,
@@ -372,6 +388,23 @@
 - A price fetch is triggered immediately after remapping; the price column updates when it returns
 - The user can dismiss the dialog without making a change
 - *Depends on E01-US09 (capture images) and E04-US01 (card reference images)*
+
+---
+
+### E04-US04 — Bulk fetch missing prices
+**As a** collector who has finished scanning a batch of cards,
+**I want** a button that triggers a background price fetch for every log entry that has no price,
+**So that** I can recover all failed prices in one action without right-clicking each row individually.
+
+**Acceptance criteria:**
+- A "Fetch Missing Prices" button is visible in the status bar
+- Clicking it enqueues a background TCGPlayer price fetch for every session row currently showing "N/A"
+- Each row's price column shows "…" while its fetch is in progress
+- Rows update individually as their fetches complete — not all at once
+- If a row already has a price it is skipped; the button only targets unpriced rows
+- The button is a no-op (does nothing visibly) if all rows already have prices
+- If a fetch fails, it is retried up to 3 times before the row reverts to "N/A"
+- Fetches run in the existing background executor and do not block the UI or scanning
 
 ---
 

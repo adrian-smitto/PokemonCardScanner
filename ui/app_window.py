@@ -1,4 +1,5 @@
 import os
+import time
 import tkinter as tk
 from tkinter import filedialog, messagebox
 from concurrent.futures import ThreadPoolExecutor
@@ -9,6 +10,7 @@ from core.camera import CameraCapture
 from core.state_machine import ScanStateMachine, ScanResult, PriceUpdate
 from core.scan_log import ScanLogger, ScanRecord
 from core.price_client import PriceClient, PriceResult
+from core.pricecharting_client import PriceChartingClient
 from core.roi import ROI, load_roi, save_roi, load_setting, save_setting
 from ui.feed_panel import FeedPanel
 from ui.result_panel import ResultPanel
@@ -16,6 +18,18 @@ from ui.log_panel import LogPanel
 from ui.debug_log import DebugLog
 from ui.resolution_dialog import ResolutionDialog
 from ui.remap_dialog import RemapDialog
+
+
+def _fetch_tcg_with_retry(price_client, card_id: str, max_retries: int = 3):
+    """Fetch TCGPlayer price, retrying up to max_retries times on failure."""
+    result = None
+    for attempt in range(max_retries):
+        result = price_client.fetch_price(card_id)
+        if result.available:
+            return result
+        if attempt < max_retries - 1:
+            time.sleep(2 ** attempt)
+    return result
 
 
 class AppWindow:
@@ -40,7 +54,8 @@ class AppWindow:
         self._camera = CameraCapture()
         self._logger = ScanLogger()
         self._price_client = PriceClient()
-        self._executor = ThreadPoolExecutor(max_workers=2)
+        self._pc_client = PriceChartingClient() if config.PRICECHARTING_ENABLED else None
+        self._executor = ThreadPoolExecutor(max_workers=4)
         self._state_machine: ScanStateMachine | None = None
         # Manual price fetches: [(future, scan_id, tree_index)]
         self._manual_price_futures: list = []
@@ -66,7 +81,8 @@ class AppWindow:
         self._log = LogPanel(
             self._root,
             on_ambiguous_click=self._open_resolution,
-            on_get_price=self._on_get_price,
+            on_get_price_tcg=self._on_get_price_tcg,
+            on_get_price_pc=self._on_get_price_pc,
             on_remap=self._on_remap,
             bg="white",
         )
@@ -84,6 +100,9 @@ class AppWindow:
 
         tk.Button(status_bar, text="Export CSV", command=self._export_csv,
                   font=("Helvetica", 9)).pack(side="right", padx=10, pady=4)
+        tk.Button(status_bar, text="Fetch Missing Prices",
+                  command=self._fetch_missing_prices,
+                  font=("Helvetica", 9)).pack(side="right", padx=(0, 4), pady=4)
 
         self._scanning = False
         self._scan_btn = tk.Button(
@@ -108,7 +127,9 @@ class AppWindow:
             self._root.after(config.UI_TICK_MS, self._tick_camera_only)
             return
 
-        self._state_machine = ScanStateMachine(self._session_id, on_status=self._debug.log)
+        self._state_machine = ScanStateMachine(
+            self._session_id, on_status=self._debug.log, pc_client=self._pc_client
+        )
 
         # Restore saved ROI
         roi = load_roi()
@@ -175,7 +196,9 @@ class AppWindow:
                          scan_token=result.scan_token)
         self._result.display(result)
 
-        self._pending_price_map[result.scan_token] = (scan_id, tree_index)
+        if result.card_id:
+            # Known card — kick off background price fetch
+            self._pending_price_map[result.scan_token] = (scan_id, tree_index)
 
         self._scan_count += 1
         self._unpriced_count += 1
@@ -187,8 +210,8 @@ class AppWindow:
             return
         scan_id, tree_index = entry
 
-        self._logger.update_price(scan_id, update.market_price)
-        self._log.update_price(tree_index, update.market_price)
+        self._logger.update_price(scan_id, update.market_price, update.price_source)
+        self._log.update_price(tree_index, update.market_price, update.price_source)
 
         self._unpriced_count -= 1
         if update.market_price is not None:
@@ -204,28 +227,53 @@ class AppWindow:
             base += f" + {self._unpriced_count} unpriced"
         self._status_var.set(base)
 
-    def _on_get_price(self, scan_id: int, tree_index: int) -> None:
+    def _fetch_missing_prices(self) -> None:
+        unpriced = self._log.get_unpriced_rows()
+        for scan_id, tree_index in unpriced:
+            row = self._logger.get_scan(scan_id)
+            if row is None or not row["card_id"]:
+                continue  # skip unknown rows — no card_id to fetch against
+            self._log.update_price_loading(tree_index)
+            future = self._executor.submit(
+                _fetch_tcg_with_retry, self._price_client, row["card_id"]
+            )
+            self._manual_price_futures.append((future, scan_id, tree_index, "tcg"))
+
+    def _on_get_price_tcg(self, scan_id: int, tree_index: int) -> None:
         row = self._logger.get_scan(scan_id)
         if row is None:
             return
         self._log.update_price_loading(tree_index)
         future = self._executor.submit(self._price_client.fetch_price, row["card_id"])
-        self._manual_price_futures.append((future, scan_id, tree_index))
+        self._manual_price_futures.append((future, scan_id, tree_index, "tcg"))
+
+    def _on_get_price_pc(self, scan_id: int, tree_index: int) -> None:
+        row = self._logger.get_scan(scan_id)
+        if row is None:
+            return
+        self._log.update_price_loading(tree_index)
+        future = self._executor.submit(
+            self._pc_client.fetch_price,
+            row["card_name"], row["set_name"], row["number"],
+        )
+        self._manual_price_futures.append((future, scan_id, tree_index, "pc"))
 
     def _drain_manual_prices(self) -> None:
         still_pending = []
-        for future, scan_id, tree_index in self._manual_price_futures:
+        for future, scan_id, tree_index, source in self._manual_price_futures:
             if not future.done():
-                still_pending.append((future, scan_id, tree_index))
+                still_pending.append((future, scan_id, tree_index, source))
                 continue
             try:
-                price: PriceResult = future.result()
-            except Exception as e:
-                price = PriceResult(card_id="", market_price=None,
-                                    low_price=None, high_price=None, error=str(e))
-            market_price = price.market_price if price.available else None
-            self._logger.update_price(scan_id, market_price)
-            self._log.update_price(tree_index, market_price)
+                result = future.result()
+            except Exception:
+                result = None
+            if source == "tcg":
+                market_price = result.market_price if (result and result.available) else None
+            else:  # "pc"
+                market_price = result.loose_price if (result and result.available) else None
+            self._logger.update_price(scan_id, market_price, source)
+            self._log.update_price(tree_index, market_price, source)
             if market_price is not None:
                 self._total_value += market_price
                 self._unpriced_count = max(0, self._unpriced_count - 1)
@@ -250,7 +298,9 @@ class AppWindow:
                     self._unpriced_count += 1
             self._update_status()
             # Fetch price for the remapped card
-            self._on_get_price(sid, tree_index)
+            self._on_get_price_tcg(sid, tree_index)
+            if config.PRICECHARTING_ENABLED:
+                self._on_get_price_pc(sid, tree_index)
 
         RemapDialog(
             self._root,

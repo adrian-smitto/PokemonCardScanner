@@ -39,7 +39,8 @@ CREATE TABLE IF NOT EXISTS scan_log (
     market_price REAL,
     hamming_dist INTEGER NOT NULL,
     is_corrected INTEGER NOT NULL DEFAULT 0,
-    scan_token   TEXT
+    scan_token   TEXT,
+    price_source TEXT
 );
 """
 
@@ -65,11 +66,15 @@ class ScanLogger:
         self._conn.execute(_CREATE_SCAN_LOG)
         self._conn.execute(_CREATE_CANDIDATES)
         self._conn.commit()
-        try:
-            self._conn.execute("ALTER TABLE scan_log ADD COLUMN scan_token TEXT")
-            self._conn.commit()
-        except sqlite3.OperationalError:
-            pass  # column already exists
+        for migration in [
+            "ALTER TABLE scan_log ADD COLUMN scan_token TEXT",
+            "ALTER TABLE scan_log ADD COLUMN price_source TEXT",
+        ]:
+            try:
+                self._conn.execute(migration)
+                self._conn.commit()
+            except sqlite3.OperationalError:
+                pass  # column already exists
 
     def log_scan(self, record: ScanRecord) -> int:
         """Insert scan and its candidates. Returns the new scan_log row id."""
@@ -117,11 +122,12 @@ class ScanLogger:
         ).fetchone()
         return row[0]
 
-    def update_price(self, scan_id: int, market_price: float | None) -> None:
+    def update_price(self, scan_id: int, market_price: float | None,
+                     price_source: str | None = None) -> None:
         """Backfill price once the background fetch completes."""
         self._conn.execute(
-            "UPDATE scan_log SET market_price=? WHERE id=?",
-            (market_price, scan_id),
+            "UPDATE scan_log SET market_price=?, price_source=? WHERE id=?",
+            (market_price, price_source, scan_id),
         )
         self._conn.commit()
 

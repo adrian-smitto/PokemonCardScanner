@@ -56,6 +56,10 @@ POKEMONTCG_API_KEY = os.getenv("POKEMONTCG_API_KEY", "")
 POKEMONTCG_BASE_URL = "https://api.pokemontcg.io/v2"
 API_TIMEOUT_SECONDS = 20
 
+# PriceCharting API (disabled by default — requires a paid API key)
+PRICECHARTING_ENABLED = False
+PRICECHARTING_API_KEY = os.getenv("PRICECHARTING_API_KEY", "")
+
 # UI
 UI_FEED_WIDTH = 640
 UI_FEED_HEIGHT = 360

@@ -57,8 +57,8 @@ class AppWindow:
         self._pc_client = PriceChartingClient() if config.PRICECHARTING_ENABLED else None
         self._executor = ThreadPoolExecutor(max_workers=4)
         self._state_machine: ScanStateMachine | None = None
-        # Manual price fetches: [(future, scan_id, tree_index)]
         self._manual_price_futures: list = []
+        self._bulk_pending: int = 0
 
         self._build_ui()
         self._startup()
@@ -94,25 +94,42 @@ class AppWindow:
         status_bar = tk.Frame(self._root, bg="#1e1e1e")
         status_bar.pack(fill="x", padx=10, pady=(0, 10))
 
-        self._status_var = tk.StringVar(value="0 cards — $0.00")
-        tk.Label(status_bar, textvariable=self._status_var, fg="#aaaaaa",
-                 bg="#1e1e1e", font=("Helvetica", 10)).pack(side="left", padx=10, pady=5)
-
-        tk.Button(status_bar, text="Export CSV", command=self._export_csv,
-                  font=("Helvetica", 9)).pack(side="right", padx=10, pady=4)
-        tk.Button(status_bar, text="Fetch Missing Prices",
-                  command=self._fetch_missing_prices,
-                  font=("Helvetica", 9)).pack(side="right", padx=(0, 4), pady=4)
+        # Row 1 — buttons
+        btn_row = tk.Frame(status_bar, bg="#1e1e1e")
+        btn_row.pack(fill="x")
 
         self._scanning = False
         self._scan_btn = tk.Button(
-            status_bar, text="▶  Enable Scanning", width=18,
+            btn_row, text="▶  Enable Scanning", width=18,
             font=("Helvetica", 9, "bold"),
             bg="#333333", fg="#aaaaaa",
             activebackground="#444444",
             command=self._toggle_scanning,
         )
-        self._scan_btn.pack(side="right", padx=(0, 6), pady=4)
+        self._scan_btn.pack(side="left", padx=(0, 6), pady=4)
+
+        tk.Button(btn_row, text="Save Session", command=self._save_session,
+                  font=("Helvetica", 9)).pack(side="left", padx=(0, 4), pady=4)
+        tk.Button(btn_row, text="Load Session", command=self._load_session,
+                  font=("Helvetica", 9)).pack(side="left", padx=(0, 4), pady=4)
+        tk.Button(btn_row, text="Fetch Missing Prices",
+                  command=self._fetch_missing_prices,
+                  font=("Helvetica", 9)).pack(side="left", padx=(0, 4), pady=4)
+        tk.Button(btn_row, text="Export CSV", command=self._export_csv,
+                  font=("Helvetica", 9)).pack(side="left", padx=(0, 4), pady=4)
+
+        # Row 2 — status text + bulk fetch indicator
+        info_row = tk.Frame(status_bar, bg="#1e1e1e")
+        info_row.pack(fill="x")
+
+        self._status_var = tk.StringVar(value="0 cards — $0.00")
+        tk.Label(info_row, textvariable=self._status_var, fg="#aaaaaa",
+                 bg="#1e1e1e", font=("Helvetica", 10)).pack(side="left", padx=(10, 0), pady=(0, 4))
+
+        self._bulk_var = tk.StringVar()
+        self._bulk_label = tk.Label(info_row, textvariable=self._bulk_var,
+                                    fg="#ffcc00", bg="#1e1e1e", font=("Helvetica", 9))
+        # shown/hidden dynamically — not packed yet
 
     def _startup(self) -> None:
         ok = self._camera.start()
@@ -229,6 +246,7 @@ class AppWindow:
 
     def _fetch_missing_prices(self) -> None:
         unpriced = self._log.get_unpriced_rows()
+        count = 0
         for scan_id, tree_index in unpriced:
             row = self._logger.get_scan(scan_id)
             if row is None or not row["card_id"]:
@@ -237,7 +255,12 @@ class AppWindow:
             future = self._executor.submit(
                 _fetch_tcg_with_retry, self._price_client, row["card_id"]
             )
-            self._manual_price_futures.append((future, scan_id, tree_index, "tcg"))
+            self._manual_price_futures.append((future, scan_id, tree_index, "tcg", True))
+            count += 1
+        if count:
+            self._bulk_pending += count
+            self._bulk_var.set(f"Fetching prices: {self._bulk_pending} remaining")
+            self._bulk_label.pack(side="left", padx=(10, 0))
 
     def _on_get_price_tcg(self, scan_id: int, tree_index: int) -> None:
         row = self._logger.get_scan(scan_id)
@@ -245,7 +268,7 @@ class AppWindow:
             return
         self._log.update_price_loading(tree_index)
         future = self._executor.submit(self._price_client.fetch_price, row["card_id"])
-        self._manual_price_futures.append((future, scan_id, tree_index, "tcg"))
+        self._manual_price_futures.append((future, scan_id, tree_index, "tcg", False))
 
     def _on_get_price_pc(self, scan_id: int, tree_index: int) -> None:
         row = self._logger.get_scan(scan_id)
@@ -256,13 +279,15 @@ class AppWindow:
             self._pc_client.fetch_price,
             row["card_name"], row["set_name"], row["number"],
         )
-        self._manual_price_futures.append((future, scan_id, tree_index, "pc"))
+        self._manual_price_futures.append((future, scan_id, tree_index, "pc", False))
 
     def _drain_manual_prices(self) -> None:
         still_pending = []
-        for future, scan_id, tree_index, source in self._manual_price_futures:
+        for entry in self._manual_price_futures:
+            future, scan_id, tree_index, source = entry[0], entry[1], entry[2], entry[3]
+            is_bulk = entry[4] if len(entry) > 4 else False
             if not future.done():
-                still_pending.append((future, scan_id, tree_index, source))
+                still_pending.append(entry)
                 continue
             try:
                 result = future.result()
@@ -277,6 +302,12 @@ class AppWindow:
             if market_price is not None:
                 self._total_value += market_price
                 self._unpriced_count = max(0, self._unpriced_count - 1)
+            if is_bulk:
+                self._bulk_pending -= 1
+                if self._bulk_pending > 0:
+                    self._bulk_var.set(f"Fetching prices: {self._bulk_pending} remaining")
+                else:
+                    self._bulk_label.pack_forget()
             self._update_status()
         self._manual_price_futures = still_pending
 
@@ -297,7 +328,6 @@ class AppWindow:
                 else:
                     self._unpriced_count += 1
             self._update_status()
-            # Fetch price for the remapped card
             self._on_get_price_tcg(sid, tree_index)
             if config.PRICECHARTING_ENABLED:
                 self._on_get_price_pc(sid, tree_index)
@@ -341,6 +371,50 @@ class AppWindow:
             price_client=self._price_client,
             on_resolved=on_resolved,
         )
+
+    def _save_session(self) -> None:
+        path = filedialog.asksaveasfilename(
+            defaultextension=".json",
+            filetypes=[("JSON files", "*.json"), ("All files", "*.*")],
+            title="Save session",
+        )
+        if not path:
+            return
+        try:
+            self._logger.export_json(self._session_id, path)
+            messagebox.showinfo("Session saved", f"Saved to:\n{path}")
+        except Exception as e:
+            messagebox.showerror("Save failed", str(e))
+
+    def _load_session(self) -> None:
+        if self._scan_count > 0:
+            if not messagebox.askyesno(
+                "Load session",
+                "This will replace the current session view. Continue?",
+            ):
+                return
+        path = filedialog.askopenfilename(
+            filetypes=[("JSON files", "*.json"), ("All files", "*.*")],
+            title="Load session",
+        )
+        if not path:
+            return
+        try:
+            import json
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if not isinstance(data, dict) or "scans" not in data:
+                raise ValueError("Invalid session file format.")
+            rows = data["scans"]
+            self._log.load_session(rows)
+            self._scan_count = len(rows)
+            self._total_value = sum(r["market_price"] for r in rows
+                                    if r.get("market_price") is not None)
+            self._unpriced_count = sum(1 for r in rows
+                                       if r.get("market_price") is None)
+            self._update_status()
+        except Exception as e:
+            messagebox.showerror("Load failed", str(e))
 
     def _export_csv(self) -> None:
         path = filedialog.asksaveasfilename(

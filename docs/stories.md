@@ -408,6 +408,46 @@
 
 ---
 
+### E04-US05 — Filter candidates by name in remap dialog
+**As a** collector using the remap dialog,
+**I want** to type a card name to filter the candidate list,
+**So that** I can quickly narrow down to the right card without scrolling through hundreds of results.
+
+**Acceptance criteria:**
+- A text input field is shown above the candidate list in the remap dialog
+- Typing in the field filters the list in real time (case-insensitive, matches anywhere in the card name)
+- Clearing the field restores the full candidate list
+- Filtering is purely client-side on the already-loaded candidates — no re-query
+- The filter resets when the candidate list is refreshed via the N slider
+
+---
+
+### E04-US06 — Double-click unknown log row opens remap
+**As a** collector reviewing the scan log,
+**I want** to double-click an "Unknown" log entry to open the remap dialog,
+**So that** I can identify it without having to right-click and navigate a menu.
+
+**Acceptance criteria:**
+- Double-clicking a log row tagged as "Unknown" opens the remap dialog for that row
+- Double-clicking a normal (matched) row does nothing
+- The existing single-click behaviour for ambiguous rows is unaffected
+- The remap dialog that opens is identical to the one triggered via right-click → Remap Card
+
+---
+
+### E04-US07 — Bulk price fetch progress indicator
+**As a** collector who triggered "Fetch Missing Prices",
+**I want** to see a status indicator while the fetches are running,
+**So that** I know the process is active and how many remain.
+
+**Acceptance criteria:**
+- While any bulk price fetches are in progress, a label appears in the status bar showing e.g. "Fetching prices: 12 remaining"
+- The count decrements as each fetch completes
+- The label disappears automatically when all fetches have settled (success or failure)
+- Single right-click "Get Price" fetches do not trigger this indicator — it is specific to the bulk action
+
+---
+
 ## E05 — Dual Price Sources
 
 ### E05-US01 — PriceCharting API integration
@@ -453,3 +493,37 @@
 - On failure, the price column reverts to "N/A" for that row
 - Both options are available on all rows regardless of current price state
 - If `PRICECHARTING_API_KEY` is not configured, "Get Price (PriceCharting)" is shown but immediately returns "N/A" with a note in the debug log
+
+---
+
+## E06 — Session Persistence
+
+### E06-US01 — Save scan session to file
+**As a** collector,
+**I want** to save my current scan session to a file,
+**So that** I can archive it, share it, or reload it in the app later.
+
+**Acceptance criteria:**
+- A "Save Session" option is available (e.g. in the status bar or a File menu)
+- Clicking it opens a save dialog; the user picks a file name and location
+- The file is saved in JSON format and includes all scan log fields for the current session: timestamp, card ID, card name, set, number, rarity, market price, price source, hamming dist, is_corrected, scan_token
+- Unknown rows (card_id = "") are included in the saved file
+- The save operation does not interrupt scanning or any in-progress price fetches
+
+---
+
+### E06-US02 — Load scan session from file
+**As a** collector,
+**I want** to load a previously saved session file into the app,
+**So that** I can review past results, correct unresolved unknowns, or continue pricing cards I scanned earlier.
+
+**Acceptance criteria:**
+- A "Load Session" option is available alongside "Save Session"
+- Clicking it opens an open-file dialog; the user picks a previously saved `.json` session file
+- The log panel is populated with the loaded session's rows, replacing the current view
+- All columns are restored: name, set, number, rarity, price (with source suffix), flags (corrected / unknown styling)
+- Unknown rows loaded from file retain the "Remap Card" right-click option if their capture image exists on disk
+- No price fetches are triggered automatically on load — prices shown are exactly those stored in the file
+- Manual price actions still work after loading: right-click "Get Price", "Fetch Missing Prices", and "Remap Card" all function normally on loaded rows
+- Loading a session does not affect `scan_log.db` — it is view-only and does not write to the DB
+- If the file is malformed or missing required fields, the app shows an error message and does not crash

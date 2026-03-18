@@ -25,6 +25,7 @@ class RemapDialog:
         self._on_resolved = on_resolved
         self._remap_n = remap_n
         self._candidates: list[CardCandidate] = []
+        self._all_iids: list[str] = []
         self._selected_idx: int | None = None
         self._thumb_cache: list[ImageTk.PhotoImage] = []  # keep refs alive
 
@@ -81,6 +82,19 @@ class RemapDialog:
         # Candidate list
         list_frame = tk.Frame(self._win, bg="#1e1e1e")
         list_frame.pack(fill="both", expand=True, padx=10, pady=(0, 6))
+
+        # Filter bar
+        filter_bar = tk.Frame(list_frame, bg="#1e1e1e")
+        filter_bar.pack(fill="x", pady=(0, 4))
+        tk.Label(filter_bar, text="Filter:", fg="#aaaaaa",
+                 bg="#1e1e1e", font=("Helvetica", 9)).pack(side="left", padx=(0, 4))
+        self._filter_var = tk.StringVar()
+        self._filter_var.trace_add("write", self._on_filter_change)
+        tk.Entry(filter_bar, textvariable=self._filter_var,
+                 bg="#333333", fg="white", insertbackground="white",
+                 relief="flat").pack(side="left", fill="x", expand=True)
+        tk.Button(filter_bar, text="✕", font=("Helvetica", 9),
+                  command=lambda: self._filter_var.set("")).pack(side="left", padx=(4, 0))
 
         cols = ("thumb", "name", "set", "number", "rarity", "dist")
         self._tree = ttk.Treeview(list_frame, columns=cols, show="headings", height=14)
@@ -161,13 +175,13 @@ class RemapDialog:
         for iid in self._tree.get_children():
             self._tree.delete(iid)
         self._thumb_cache.clear()
+        self._all_iids.clear()
         self._selected_idx = None
         self._confirm_btn.config(state="disabled")
+        self._filter_var.set("")
 
         for card in self._candidates:
-            # Load thumbnail
             thumb_photo = self._load_thumb(card.card_id)
-
             iid = self._tree.insert("", "end", image=thumb_photo, values=(
                 "", card.name, card.set_name, card.number,
                 card.rarity or "", card.hamming_dist,
@@ -175,6 +189,16 @@ class RemapDialog:
             if thumb_photo:
                 self._tree.item(iid, image=thumb_photo)
             self._thumb_cache.append(thumb_photo)
+            self._all_iids.append(iid)
+
+    def _on_filter_change(self, *_) -> None:
+        query = self._filter_var.get().lower()
+        for iid in self._all_iids:
+            name = self._tree.item(iid, "values")[1].lower()
+            if query in name:
+                self._tree.reattach(iid, "", "end")
+            else:
+                self._tree.detach(iid)
 
     def _load_thumb(self, card_id: str) -> ImageTk.PhotoImage | None:
         safe_id = card_id.replace("/", "_")
@@ -194,8 +218,10 @@ class RemapDialog:
             self._selected_idx = None
             self._confirm_btn.config(state="disabled")
             return
-        items = list(self._tree.get_children())
-        self._selected_idx = items.index(sel[0])
+        try:
+            self._selected_idx = self._all_iids.index(sel[0])
+        except ValueError:
+            return
         self._confirm_btn.config(state="normal")
         card = self._candidates[self._selected_idx]
         self._show_selected_preview(card.card_id)

@@ -1,5 +1,6 @@
 import sqlite3
 import csv
+import json
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 import config
@@ -161,6 +162,12 @@ class ScanLogger:
                     row["rarity"], row["market_price"],
                     row["hamming_dist"], row["is_corrected"],
                 ])
+
+    def export_json(self, session_id: str, filepath: str) -> None:
+        rows = self.get_session_scans(session_id)
+        data = [dict(row) for row in rows]
+        with open(filepath, "w", encoding="utf-8") as f:
+            json.dump({"version": 1, "scans": data}, f, indent=2)
 
     def get_scan(self, scan_id: int) -> sqlite3.Row | None:
         return self._conn.execute(

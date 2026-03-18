@@ -12,9 +12,10 @@ class LogPanel(tk.Frame):
         self._on_get_price_tcg = on_get_price_tcg
         self._on_get_price_pc = on_get_price_pc
         self._on_remap = on_remap
-        self._scan_ids: list[int | None] = []   # parallel to tree rows
+        self._scan_ids: list[int | None] = []
         self._candidate_counts: list[int] = []
         self._scan_tokens: list[str | None] = []
+        self._card_ids: list[str] = []
         self._build()
 
     def _build(self) -> None:
@@ -46,6 +47,7 @@ class LogPanel(tk.Frame):
         self._tree.tag_configure("unknown", foreground="#888888")
 
         self._tree.bind("<ButtonRelease-1>", self._on_click)
+        self._tree.bind("<Double-ButtonRelease-1>", self._on_double_click)
         self._tree.bind("<Button-3>", self._on_right_click)
 
         self._empty_label = tk.Label(self, text="No cards scanned yet",
@@ -73,6 +75,7 @@ class LogPanel(tk.Frame):
         self._scan_ids.append(scan_id)
         self._candidate_counts.append(candidate_count)
         self._scan_tokens.append(scan_token)
+        self._card_ids.append(result.card_id)
 
     def update_price(self, tree_index: int, market_price: float | None,
                      source: str | None = None) -> None:
@@ -107,7 +110,19 @@ class LogPanel(tk.Frame):
         self._scan_ids = []
         self._candidate_counts = []
         self._scan_tokens = []
+        self._card_ids = []
         self._empty_label.place(relx=0.5, rely=0.5, anchor="center")
+
+    def _on_double_click(self, event) -> None:
+        item = self._tree.identify_row(event.y)
+        if not item:
+            return
+        idx = list(self._tree.get_children()).index(item)
+        if idx < len(self._card_ids) and self._card_ids[idx] == "":
+            scan_id = self._scan_ids[idx] if idx < len(self._scan_ids) else None
+            scan_token = self._scan_tokens[idx] if idx < len(self._scan_tokens) else None
+            if self._on_remap:
+                self._on_remap(scan_id, scan_token, idx)
 
     def _on_click(self, event) -> None:
         if not self._on_ambiguous_click:
@@ -168,3 +183,33 @@ class LogPanel(tk.Frame):
         iid = items[tree_index]
         vals = self._tree.item(iid, "values")
         self._tree.item(iid, values=(vals[0], vals[1], vals[2], vals[3], vals[4], "…", vals[6]))
+
+    def load_session(self, rows: list[dict]) -> None:
+        """Populate the log from a saved session (no live ScanResult objects)."""
+        self.clear()
+        self._empty_label.place_forget()
+        for row in rows:
+            card_id = row.get("card_id") or ""
+            is_unknown = card_id == ""
+            price = row.get("market_price")
+            source = row.get("price_source")
+            if price is not None:
+                price_str = f"${price:.2f} {source}" if source else f"${price:.2f}"
+            else:
+                price_str = "N/A"
+            flags = "corrected" if row.get("is_corrected") else ""
+            ts = row.get("scanned_at", "")[:19].replace("T", " ")[-8:]  # HH:MM:SS
+            iid = self._tree.insert(
+                "", "end",
+                tags=("unknown",) if is_unknown else (),
+                values=(ts, row.get("card_name", ""), row.get("set_name", ""),
+                        row.get("number", ""), row.get("rarity") or "",
+                        price_str, flags),
+            )
+            self._tree.see(iid)
+            self._scan_ids.append(row.get("id"))
+            self._candidate_counts.append(0)
+            self._scan_tokens.append(row.get("scan_token"))
+            self._card_ids.append(card_id)
+        if not rows:
+            self._empty_label.place(relx=0.5, rely=0.5, anchor="center")

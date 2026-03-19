@@ -601,10 +601,10 @@
 **Acceptance criteria:**
 - A keyboard shortcut (default: `Ctrl+Shift+S`, configurable in `config.py` as `SNIP_HOTKEY`) opens snip mode when the app has focus
 - The shortcut is a no-op if scanning is currently enabled — the two modes are mutually exclusive
-- On activation, a fullscreen semi-transparent overlay appears on top of all windows on the primary monitor
+- On activation, a semi-transparent overlay appears on top of all windows, spanning all connected monitors
 - The overlay has a crosshair cursor; clicking and dragging draws a visible selection rectangle
 - Pressing Escape cancels the snip; the overlay closes and nothing is logged
-- On mouse release, the selected screen region is captured using `PIL.ImageGrab.grab(bbox=...)`
+- On mouse release, the selected screen region is captured using `PIL.ImageGrab.grab(bbox=..., all_screens=True)`, correctly handling regions on any monitor including those with negative virtual screen coordinates
 - The captured image is saved to `captures/` with a UUID `scan_token` (same format as camera scans)
 - The capture is matched against the card DB using the same phash pipeline as the camera (`compute_phash` → `find_matches`)
 - Matching runs in the background executor; the UI is not blocked

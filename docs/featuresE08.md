@@ -7,15 +7,15 @@ Covers stories: E08-US01, E08-US02.
 ## Design summary
 
 The user presses `Ctrl+Shift+S` (configurable) while the app has focus and scanning is
-disabled. A fullscreen semi-transparent Tkinter overlay appears. The user drags a
-rectangle around a card image visible on screen (browser, spreadsheet, anywhere). On
-mouse release, `PIL.ImageGrab.grab(bbox)` captures the region; the image is saved and
-run through the same phash → `find_matches` pipeline as a camera scan. The result is
-appended to the log panel. The overlay closes; the user presses the shortcut again for
-the next card.
+disabled. A semi-transparent Tkinter overlay appears spanning **all connected monitors**.
+The user drags a rectangle around a card image visible anywhere on screen (browser,
+spreadsheet, second monitor, etc.). On mouse release, `PIL.ImageGrab.grab(bbox,
+all_screens=True)` captures the region; the image is saved and run through the same
+phash → `find_matches` pipeline as a camera scan. The result is appended to the log
+panel. The overlay closes; the user presses the shortcut again for the next card.
 
 No new pip dependencies. `PIL.ImageGrab` is already available via Pillow. The overlay is
-pure Tkinter.
+pure Tkinter. Virtual desktop bounds are read via `ctypes.windll.user32` (stdlib).
 
 ---
 
@@ -23,7 +23,7 @@ pure Tkinter.
 
 ```
 1. config.py          — add SNIP_HOTKEY
-2. ui/snip_overlay.py — new: fullscreen overlay + rubber-band selection
+2. ui/snip_overlay.py — new: multi-monitor overlay + rubber-band selection
 3. ui/app_window.py   — bind shortcut; drain snip futures; wire result into existing pipeline
 ```
 
@@ -40,9 +40,9 @@ SNIP_HOTKEY = "<Control-Shift-S>"   # Tkinter key binding syntax
 ## Feature 2 — `ui/snip_overlay.py` (new file)
 
 ### Responsibilities
-- Cover the full primary screen with a semi-transparent, borderless Toplevel
+- Cover **all monitors** (virtual desktop) with a semi-transparent, borderless Toplevel
 - Capture mouse drag to draw a rubber-band selection rectangle on a Canvas
-- On release: deliver the screen-coordinate bbox `(x1, y1, x2, y2)` to the caller
+- On release: deliver virtual-screen-coordinate bbox `(x1, y1, x2, y2)` to the caller
 - On Escape: close without calling back
 
 ### Class interface
@@ -53,20 +53,37 @@ class SnipOverlay:
         ...
 ```
 
-`on_capture(bbox: tuple[int,int,int,int])` — called with screen coordinates on release.
+`on_capture(bbox: tuple[int,int,int,int])` — called with virtual screen coordinates on release.
 `on_cancel()` — called when Escape is pressed (optional).
+
+### Virtual desktop bounds
+
+```python
+import ctypes
+_u32 = ctypes.windll.user32
+_u32.SetProcessDPIAware()          # ensure coordinates are physical pixels, not scaled
+vx = _u32.GetSystemMetrics(76)     # SM_XVIRTUALSCREEN  — left edge (may be negative)
+vy = _u32.GetSystemMetrics(77)     # SM_YVIRTUALSCREEN  — top edge  (may be negative)
+vw = _u32.GetSystemMetrics(78)     # SM_CXVIRTUALSCREEN — total width across all monitors
+vh = _u32.GetSystemMetrics(79)     # SM_CYVIRTUALSCREEN — total height across all monitors
+```
+
+These are read once in `__init__` and stored as `self._vx, self._vy`.
 
 ### Window setup
 
 ```python
 self._win = tk.Toplevel(parent)
-self._win.attributes('-fullscreen', True)
+self._win.geometry(f"{vw}x{vh}+{vx}+{vy}")   # span all monitors
 self._win.attributes('-alpha', 0.25)
 self._win.attributes('-topmost', True)
-self._win.overrideredirect(True)      # no title bar / borders
+self._win.overrideredirect(True)               # no title bar / borders
 self._win.configure(bg='grey')
 self._win.grab_set()
 ```
+
+`overrideredirect(True)` + explicit geometry replaces `attributes('-fullscreen', True)`,
+which only covers the primary monitor.
 
 ### Canvas + bindings
 
@@ -86,9 +103,14 @@ self._win.bind('<Escape>',             self._on_escape)
 
 ### Coordinate strategy
 
-Mouse events on the Canvas give widget-local `(event.x, event.y)`. Because the window is
-fullscreen and positioned at (0, 0), widget-local coordinates equal screen coordinates on
-the primary monitor. Use them directly as the `bbox` for `ImageGrab.grab()`.
+Widget-local `event.x/y` are relative to the window's top-left corner, which is at
+`(vx, vy)` in screen space. To convert to virtual screen coordinates (required by
+`ImageGrab.grab`):
+
+```python
+screen_x = self._vx + event.x
+screen_y = self._vy + event.y
+```
 
 ```python
 def _on_press(self, event) -> None:
@@ -109,13 +131,14 @@ def _on_drag(self, event) -> None:
 def _on_release(self, event) -> None:
     if not self._start:
         return
-    x1, y1 = self._start
-    x2, y2 = event.x, event.y
-    # Normalise so x1<x2, y1<y2
-    bbox = (min(x1,x2), min(y1,y2), max(x1,x2), max(y1,y2))
+    # Convert widget-local coords to virtual screen coords
+    x1 = self._vx + min(self._start[0], event.x)
+    y1 = self._vy + min(self._start[1], event.y)
+    x2 = self._vx + max(self._start[0], event.x)
+    y2 = self._vy + max(self._start[1], event.y)
     self._win.destroy()
-    if bbox[2] - bbox[0] > 5 and bbox[3] - bbox[1] > 5:
-        self._on_capture(bbox)
+    if x2 - x1 > 5 and y2 - y1 > 5:
+        self._on_capture((x1, y1, x2, y2))
     # else: selection too small — silently discard
 
 def _on_escape(self, _event) -> None:
@@ -132,7 +155,6 @@ def _on_escape(self, _event) -> None:
 
 ```python
 from PIL import ImageGrab
-import config          # already imported
 from ui.snip_overlay import SnipOverlay
 ```
 
@@ -142,7 +164,7 @@ from ui.snip_overlay import SnipOverlay
 self._snip_futures: list = []   # (future, scan_token)
 ```
 
-### Shortcut binding (in `_startup`, after the root window exists)
+### Shortcut binding (in `_startup`)
 
 ```python
 self._root.bind(config.SNIP_HOTKEY, self._on_snip_hotkey)
@@ -151,10 +173,11 @@ self._root.bind(config.SNIP_HOTKEY, self._on_snip_hotkey)
 ### Snip label in status bar (in `_build_ui`, `info_row`)
 
 ```python
-self._snip_var = tk.StringVar(value=f"Snip: {config.SNIP_HOTKEY.strip('<>').replace('-', '+')} (disabled while scanning)")
+shortcut_display = config.SNIP_HOTKEY.strip("<>").replace("-", "+")
+self._snip_var = tk.StringVar(value=f"Snip: {shortcut_display}")
 self._snip_label = tk.Label(
     info_row, textvariable=self._snip_var,
-    fg="#555555", bg="#1e1e1e", font=("Helvetica", 8),
+    fg="#888888", bg="#1e1e1e", font=("Helvetica", 8),
 )
 self._snip_label.pack(side="right", padx=(0, 10))
 ```
@@ -183,7 +206,8 @@ def _on_snip_hotkey(self, _event=None) -> None:
 
 ```python
 def _on_snip_cancel(self) -> None:
-    self._snip_var.set(f"Snip: Ctrl+Shift+S")
+    shortcut_display = config.SNIP_HOTKEY.strip("<>").replace("-", "+")
+    self._snip_var.set(f"Snip: {shortcut_display}")
     self._snip_label.config(fg="#888888")
 ```
 
@@ -191,11 +215,12 @@ def _on_snip_cancel(self) -> None:
 
 ```python
 def _on_snip_capture(self, bbox: tuple) -> None:
-    self._snip_var.set(f"Snip: Ctrl+Shift+S")
+    shortcut_display = config.SNIP_HOTKEY.strip("<>").replace("-", "+")
+    self._snip_var.set(f"Snip: {shortcut_display}")
     self._snip_label.config(fg="#888888")
 
     try:
-        img = ImageGrab.grab(bbox=bbox, all_screens=False)
+        img = ImageGrab.grab(bbox=bbox, all_screens=True)
         img = img.convert("RGB")
     except Exception as e:
         self._debug.log(f"Screen capture failed: {e}", "error")
@@ -211,9 +236,8 @@ def _on_snip_capture(self, bbox: tuple) -> None:
         pass
 
     # Submit match to background executor
-    matcher = self._state_machine.matcher
     future = self._executor.submit(
-        self._run_snip_match, img, matcher
+        self._run_snip_match, img, self._state_machine.matcher
     )
     self._snip_futures.append((future, scan_token))
 ```
@@ -250,13 +274,12 @@ Add `self._drain_snip_futures()` call in `_tick`, alongside `_drain_manual_price
 
 ### `_handle_snip_result`
 
-Reuses the existing `_handle_result` path almost entirely. The only difference is the
-`ScanResult` is built here rather than coming from the state machine queue.
+Builds a `ScanResult` and calls the existing `_handle_result()` — DB write, log panel
+append, price fetch, and audio all work for free.
 
 ```python
 def _handle_snip_result(self, match_result, scan_token: str) -> None:
     from core.state_machine import ScanResult
-    from core.matcher import MatchResult
 
     if match_result is None:
         closest = self._state_machine.matcher.last_closest_dist
@@ -298,7 +321,7 @@ def _handle_snip_result(self, match_result, scan_token: str) -> None:
             price_error=None, candidates=candidates,
         )
 
-    self._handle_result(result)   # existing method handles DB log + panel + price fetch
+    self._handle_result(result)
 ```
 
 ---
@@ -308,23 +331,23 @@ def _handle_snip_result(self, match_result, scan_token: str) -> None:
 | File | Changes |
 |---|---|
 | `config.py` | Add `SNIP_HOTKEY` |
-| `ui/snip_overlay.py` | **New file** — fullscreen overlay + rubber-band selection |
+| `ui/snip_overlay.py` | **New file** — multi-monitor overlay + rubber-band selection |
 | `ui/app_window.py` | Bind shortcut; `_on_snip_hotkey`, `_on_snip_capture`, `_on_snip_cancel`, `_run_snip_match`, `_drain_snip_futures`, `_handle_snip_result`; snip label in status bar; drain call in `_tick` |
 
 No changes to `core/`, `core/state_machine.py`, `ui/log_panel.py`, or the DB schema.
 
 ---
 
-## Limitations / known constraints
+## Known constraints
 
-- **Primary monitor only**: `attributes('-fullscreen', True)` covers only the primary
-  monitor. The snip area is limited to that monitor. Multi-monitor support would require
-  computing the virtual desktop bounds — not in scope for this story.
 - **App must have focus**: The shortcut is a Tkinter root binding, not a global OS hook.
-  The user must click the app once before pressing the shortcut. In practice this is fine
-  because the app window can sit alongside the browser.
+  The user must click the app once before pressing the shortcut. The app window can sit
+  alongside the browser on any monitor.
 - **Scanning must be disabled**: The shortcut silently no-ops if scanning is on.
   This is intentional — the two modes are mutually exclusive.
+- **DPI scaling**: `SetProcessDPIAware()` is called to ensure ctypes metrics and
+  `ImageGrab` coordinates are in physical pixels. If the app is launched without this
+  call elsewhere, coordinates may be off on high-DPI displays.
 
 ---
 
@@ -332,7 +355,9 @@ No changes to `core/`, `core/state_machine.py`, `ui/log_panel.py`, or the DB sch
 
 - [ ] `Ctrl+Shift+S` with scanning disabled opens the semi-transparent overlay
 - [ ] `Ctrl+Shift+S` with scanning enabled does nothing
+- [ ] Overlay spans all connected monitors (not just the primary)
 - [ ] Crosshair cursor appears; dragging draws a red selection rectangle
+- [ ] Selection rectangle drawn on a secondary monitor captures the correct region
 - [ ] Escape closes the overlay without logging anything
 - [ ] A very small drag (< 5px) is silently discarded without crashing
 - [ ] After release, the overlay closes immediately

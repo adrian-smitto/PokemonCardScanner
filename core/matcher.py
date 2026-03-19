@@ -1,4 +1,5 @@
 import sqlite3
+import time
 from dataclasses import dataclass, field
 
 import imagehash
@@ -50,13 +51,16 @@ class CardMatcher:
             )))
 
         self.last_closest_dist: int = 999
+        self.last_match_ms: float = 0.0
 
     def find_matches(self, query_hash: imagehash.ImageHash,
                      fallback_hash: imagehash.ImageHash | None = None) -> MatchResult | None:
         """Scan the DB with query_hash; if no match, try fallback_hash (e.g. 180° rotation)."""
+        t0 = time.monotonic()
         result = self._scan(query_hash)
         if result is None and fallback_hash is not None:
             result = self._scan(fallback_hash)
+        self.last_match_ms = (time.monotonic() - t0) * 1000
         return result
 
     def _scan(self, query_hash: imagehash.ImageHash) -> MatchResult | None:

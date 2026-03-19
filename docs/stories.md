@@ -527,3 +527,64 @@
 - Manual price actions still work after loading: right-click "Get Price", "Fetch Missing Prices", and "Remap Card" all function normally on loaded rows
 - Loading a session does not affect `scan_log.db` — it is view-only and does not write to the DB
 - If the file is malformed or missing required fields, the app shows an error message and does not crash
+
+---
+
+## E07 — UI Polish & Quick Actions
+
+### E07-US01 — Double-click to confirm in remap dialog
+**As a** collector remapping a card,
+**I want** to double-click a candidate row to immediately confirm it,
+**So that** I don't have to click once to select and then click Confirm separately.
+
+**Acceptance criteria:**
+- Double-clicking a candidate row in the remap dialog selects it and immediately confirms, closing the dialog and applying the remap
+- Double-clicking a row that is hidden by the name filter has no effect (cannot happen by definition — hidden rows cannot be clicked)
+- Single-click still only selects; the Confirm button still works as before
+- The behaviour is identical to selecting a row and pressing Confirm — all the same callbacks fire
+
+---
+
+### E07-US02 — Filter log panel to show only unknown rows
+**As a** collector reviewing a long session,
+**I want** a checkbox to show only "Unknown" rows in the scan log,
+**So that** I can quickly find and resolve all unidentified cards without scrolling through matched ones.
+
+**Acceptance criteria:**
+- A "Unknown only" checkbox is visible above the scan log treeview
+- When checked, only rows tagged as unknown (card_id = "") are shown; all other rows are hidden
+- When unchecked, all rows are restored
+- The filter is purely client-side — no re-query, instant toggle
+- Checking/unchecking the filter does not affect price updates, remap, or any other action on visible rows (index mapping remains correct for all background operations)
+- The "Has alts" filter (E07-US03) and this filter are independent; checking both shows rows that are unknown AND have alts (though in practice unknowns have no alts — the intersection will be empty)
+
+---
+
+### E07-US03 — Filter log panel to show only rows with alternatives
+**As a** collector reviewing a long session,
+**I want** a checkbox to show only rows that have alternative card matches,
+**So that** I can quickly audit and correct all ambiguous identifications in one pass.
+
+**Acceptance criteria:**
+- A "Has alts" checkbox is visible above the scan log treeview (alongside the "Unknown only" checkbox from E07-US02)
+- When checked, only rows with a candidate count > 0 are shown; all other rows are hidden
+- When unchecked, all rows are restored (subject to other active filters)
+- The filter is purely client-side — no re-query, instant toggle
+- Index mapping for all background operations (price updates, remap) remains correct while the filter is active
+
+---
+
+### E07-US04 — Persist window positions across app restarts
+**As a** collector who arranges windows to suit their workflow,
+**I want** the app to remember where the main window, remap dialog, and alts dialog were last positioned,
+**So that** I don't have to reposition them every time I open the app.
+
+**Acceptance criteria:**
+- On close, the main app window's position and size are saved to `settings.json`
+- On launch, the main app window is restored to the saved position and size; if no saved value exists, the default (OS-chosen) position is used
+- If the saved position is off-screen (e.g. the monitor it was on is no longer connected), the window opens at the default position instead of an unusable off-screen location
+- On close/confirm/cancel, the remap dialog's position and size are saved to `settings.json`
+- On next open, the remap dialog opens at the saved position
+- On close/confirm/cancel, the resolution (alts) dialog's position and size are saved to `settings.json`
+- On next open, the resolution dialog opens at the saved position
+- All three geometry values are stored as independent keys in `settings.json` (e.g. `"main_geometry"`, `"remap_geometry"`, `"resolution_geometry"`)

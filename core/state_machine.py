@@ -216,7 +216,8 @@ class ScanStateMachine:
                 self._match_future = None
                 if result is None:
                     closest = self._matcher.last_closest_dist
-                    self._status(f"No match found (closest dist={closest}) — logged as Unknown", "error")
+                    match_ms = int(self._matcher.last_match_ms)
+                    self._status(f"No match found (closest dist={closest}, {match_ms}ms) — logged as Unknown", "error")
                     audio.play_failure()
 
                     scan_token = str(uuid.uuid4())
@@ -259,9 +260,10 @@ class ScanStateMachine:
                         return annotated, contour
 
                     alts = len(result.candidates)
+                    match_ms = int(self._matcher.last_match_ms)
                     self._status(
                         f"Matched: {result.primary.name} [{result.primary.set_name} #{result.primary.number}]"
-                        f" — dist={result.primary.hamming_dist}"
+                        f" — dist={result.primary.hamming_dist}, {match_ms}ms"
                         + (f" ({alts} alternative{'s' if alts > 1 else ''})" if alts else ""),
                         "match"
                     )

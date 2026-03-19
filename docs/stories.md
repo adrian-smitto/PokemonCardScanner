@@ -588,3 +588,40 @@
 - On close/confirm/cancel, the resolution (alts) dialog's position and size are saved to `settings.json`
 - On next open, the resolution dialog opens at the saved position
 - All three geometry values are stored as independent keys in `settings.json` (e.g. `"main_geometry"`, `"remap_geometry"`, `"resolution_geometry"`)
+
+---
+
+## E08 — Manual Screen Capture
+
+### E08-US01 — Identify a card by snipping a region of the screen
+**As a** collector browsing card images on screen (e.g. in a browser or spreadsheet),
+**I want** to press a keyboard shortcut and draw a rectangle around the card image on my screen,
+**So that** the app identifies and logs it just like a camera scan, without me having to physically place the card.
+
+**Acceptance criteria:**
+- A keyboard shortcut (default: `Ctrl+Shift+S`, configurable in `config.py` as `SNIP_HOTKEY`) opens snip mode when the app has focus
+- The shortcut is a no-op if scanning is currently enabled — the two modes are mutually exclusive
+- On activation, a fullscreen semi-transparent overlay appears on top of all windows on the primary monitor
+- The overlay has a crosshair cursor; clicking and dragging draws a visible selection rectangle
+- Pressing Escape cancels the snip; the overlay closes and nothing is logged
+- On mouse release, the selected screen region is captured using `PIL.ImageGrab.grab(bbox=...)`
+- The captured image is saved to `captures/` with a UUID `scan_token` (same format as camera scans)
+- The capture is matched against the card DB using the same phash pipeline as the camera (`compute_phash` → `find_matches`)
+- Matching runs in the background executor; the UI is not blocked
+- If a match is found, the row is appended to the log panel with name, set, number, rarity, and a background price fetch is triggered — identical to a camera scan result
+- If no match is found, the row is logged as "Unknown" with the capture saved — identical to a camera no-match; the user can remap it later
+- After the capture is taken, the overlay closes immediately; the user presses the shortcut again to snip another card
+- Snipped cards are logged in `scan_log.db` under the current session and are included in CSV and JSON exports
+
+---
+
+### E08-US02 — Snip mode indicator in the status bar
+**As a** collector,
+**I want** to see a clear visual cue that snip mode is available (or active),
+**So that** I know the shortcut is working and what state the app is in.
+
+**Acceptance criteria:**
+- The keyboard shortcut and its current enabled/disabled state are shown in the UI (e.g. a label "Snip: Ctrl+Shift+S" in the status bar, greyed out when scanning is active)
+- When the overlay is open and waiting for a drag, the status bar label updates to "Snipping…"
+- When the overlay closes (capture taken or Escape pressed), the label reverts to its normal state
+- No separate "Snip mode" button is required — the label is informational only

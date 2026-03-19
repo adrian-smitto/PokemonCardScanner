@@ -6,6 +6,7 @@ from PIL import Image, ImageTk
 import config
 from core.hasher import compute_phash
 from core.matcher import CardMatcher, CardCandidate
+from core.roi import load_setting, save_setting, is_on_screen
 
 
 class RemapDialog:
@@ -33,7 +34,12 @@ class RemapDialog:
         self._win.title("Remap Card")
         self._win.configure(bg="#1e1e1e")
         self._win.resizable(True, True)
+        self._win.protocol("WM_DELETE_WINDOW", self._close)
         self._win.grab_set()
+
+        geo = load_setting("remap_geometry", None)
+        if geo and is_on_screen(geo):
+            self._win.geometry(geo)
 
         self._build()
         self._load_capture()
@@ -118,6 +124,7 @@ class RemapDialog:
         vsb.pack(side="right", fill="y")
 
         self._tree.bind("<<TreeviewSelect>>", self._on_select)
+        self._tree.bind("<Double-ButtonRelease-1>", self._on_double_click)
 
         # Buttons
         btn_bar = tk.Frame(self._win, bg="#1e1e1e")
@@ -130,7 +137,7 @@ class RemapDialog:
         )
         self._confirm_btn.pack(side="right", padx=(4, 0))
         tk.Button(
-            btn_bar, text="Cancel", command=self._win.destroy,
+            btn_bar, text="Cancel", command=self._close,
             font=("Helvetica", 9),
         ).pack(side="right")
 
@@ -242,6 +249,14 @@ class RemapDialog:
         except Exception:
             self._selected_label.config(image="", text="No image", width=15, height=10)
 
+    def _close(self) -> None:
+        save_setting("remap_geometry", self._win.geometry())
+        self._win.destroy()
+
+    def _on_double_click(self, _event) -> None:
+        if self._selected_idx is not None:
+            self._confirm()
+
     def _confirm(self) -> None:
         if self._selected_idx is None or self._selected_idx >= len(self._candidates):
             return
@@ -251,4 +266,4 @@ class RemapDialog:
             card.card_id, card.name, card.set_name,
             card.number, card.rarity,
         )
-        self._win.destroy()
+        self._close()

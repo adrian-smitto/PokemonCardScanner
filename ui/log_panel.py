@@ -16,9 +16,32 @@ class LogPanel(tk.Frame):
         self._candidate_counts: list[int] = []
         self._scan_tokens: list[str | None] = []
         self._card_ids: list[str] = []
+        self._all_iids: list[str] = []
         self._build()
 
     def _build(self) -> None:
+        # Filter bar
+        filter_bar = tk.Frame(self, bg="#1e1e1e")
+        filter_bar.pack(fill="x", padx=4, pady=(4, 2))
+
+        self._filter_unknown_var = tk.BooleanVar(value=False)
+        tk.Checkbutton(
+            filter_bar, text="Unknown only",
+            variable=self._filter_unknown_var,
+            command=self._apply_filters,
+            bg="#1e1e1e", fg="#aaaaaa", selectcolor="#333333",
+            activebackground="#1e1e1e", activeforeground="white",
+        ).pack(side="left", padx=(0, 12))
+
+        self._filter_alts_var = tk.BooleanVar(value=False)
+        tk.Checkbutton(
+            filter_bar, text="Has alts",
+            variable=self._filter_alts_var,
+            command=self._apply_filters,
+            bg="#1e1e1e", fg="#aaaaaa", selectcolor="#333333",
+            activebackground="#1e1e1e", activeforeground="white",
+        ).pack(side="left")
+
         cols = ("time", "name", "set", "number", "rarity", "price", "flags")
         self._tree = ttk.Treeview(self, columns=cols, show="headings", height=10)
 
@@ -76,14 +99,14 @@ class LogPanel(tk.Frame):
         self._candidate_counts.append(candidate_count)
         self._scan_tokens.append(scan_token)
         self._card_ids.append(result.card_id)
+        self._all_iids.append(iid)
 
     def update_price(self, tree_index: int, market_price: float | None,
                      source: str | None = None) -> None:
         """Backfill the price cell once the background fetch completes."""
-        items = self._tree.get_children()
-        if tree_index >= len(items):
+        if tree_index >= len(self._all_iids):
             return
-        iid = items[tree_index]
+        iid = self._all_iids[tree_index]
         if market_price is not None:
             price_str = f"${market_price:.2f} {source}" if source else f"${market_price:.2f}"
         else:
@@ -94,10 +117,9 @@ class LogPanel(tk.Frame):
     def update_resolved(self, tree_index: int, card_name: str, set_name: str,
                         number: str, rarity: str | None, market_price: float | None) -> None:
         """Update a row after manual resolution."""
-        items = self._tree.get_children()
-        if tree_index >= len(items):
+        if tree_index >= len(self._all_iids):
             return
-        iid = items[tree_index]
+        iid = self._all_iids[tree_index]
         price_str = f"${market_price:.2f}" if market_price is not None else "N/A"
         vals = self._tree.item(iid, "values")
         self._tree.item(iid, values=(
@@ -105,19 +127,22 @@ class LogPanel(tk.Frame):
         ))
 
     def clear(self) -> None:
-        for iid in self._tree.get_children():
+        for iid in self._all_iids:
             self._tree.delete(iid)
         self._scan_ids = []
         self._candidate_counts = []
         self._scan_tokens = []
         self._card_ids = []
+        self._all_iids = []
+        self._filter_unknown_var.set(False)
+        self._filter_alts_var.set(False)
         self._empty_label.place(relx=0.5, rely=0.5, anchor="center")
 
     def _on_double_click(self, event) -> None:
         item = self._tree.identify_row(event.y)
         if not item:
             return
-        idx = list(self._tree.get_children()).index(item)
+        idx = self._all_iids.index(item)
         if idx < len(self._card_ids) and self._card_ids[idx] == "":
             scan_id = self._scan_ids[idx] if idx < len(self._scan_ids) else None
             scan_token = self._scan_tokens[idx] if idx < len(self._scan_tokens) else None
@@ -130,8 +155,7 @@ class LogPanel(tk.Frame):
         item = self._tree.identify_row(event.y)
         if not item:
             return
-        items = list(self._tree.get_children())
-        idx = items.index(item)
+        idx = self._all_iids.index(item)
         if idx < len(self._candidate_counts) and self._candidate_counts[idx] > 0:
             scan_id = self._scan_ids[idx]
             self._on_ambiguous_click(scan_id, idx)
@@ -141,8 +165,7 @@ class LogPanel(tk.Frame):
         if not item:
             return
         self._tree.selection_set(item)
-        items = list(self._tree.get_children())
-        idx = items.index(item)
+        idx = self._all_iids.index(item)
         scan_id = self._scan_ids[idx] if idx < len(self._scan_ids) else None
         scan_token = self._scan_tokens[idx] if idx < len(self._scan_tokens) else None
 
@@ -169,7 +192,7 @@ class LogPanel(tk.Frame):
     def get_unpriced_rows(self) -> list[tuple[int, int]]:
         """Return (scan_id, tree_index) for every row currently showing N/A."""
         result = []
-        for idx, iid in enumerate(self._tree.get_children()):
+        for idx, iid in enumerate(self._all_iids):
             vals = self._tree.item(iid, "values")
             price_str = vals[5] if len(vals) > 5 else ""
             if price_str == "N/A" and idx < len(self._scan_ids) and self._scan_ids[idx] is not None:
@@ -177,10 +200,9 @@ class LogPanel(tk.Frame):
         return result
 
     def update_price_loading(self, tree_index: int) -> None:
-        items = self._tree.get_children()
-        if tree_index >= len(items):
+        if tree_index >= len(self._all_iids):
             return
-        iid = items[tree_index]
+        iid = self._all_iids[tree_index]
         vals = self._tree.item(iid, "values")
         self._tree.item(iid, values=(vals[0], vals[1], vals[2], vals[3], vals[4], "…", vals[6]))
 
@@ -211,5 +233,22 @@ class LogPanel(tk.Frame):
             self._candidate_counts.append(0)
             self._scan_tokens.append(row.get("scan_token"))
             self._card_ids.append(card_id)
+            self._all_iids.append(iid)
         if not rows:
             self._empty_label.place(relx=0.5, rely=0.5, anchor="center")
+
+    def _apply_filters(self) -> None:
+        want_unknown = self._filter_unknown_var.get()
+        want_alts    = self._filter_alts_var.get()
+        for i, iid in enumerate(self._all_iids):
+            is_unknown = i < len(self._card_ids) and self._card_ids[i] == ""
+            has_alts   = i < len(self._candidate_counts) and self._candidate_counts[i] > 0
+            show = True
+            if want_unknown and not is_unknown:
+                show = False
+            if want_alts and not has_alts:
+                show = False
+            if show:
+                self._tree.reattach(iid, "", "end")
+            else:
+                self._tree.detach(iid)

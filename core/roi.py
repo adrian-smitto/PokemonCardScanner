@@ -7,6 +7,7 @@ Persisted to settings.json.
 from __future__ import annotations
 import json
 import os
+import re
 from dataclasses import dataclass
 
 SETTINGS_PATH = "settings.json"
@@ -88,3 +89,12 @@ def save_setting(key: str, value) -> None:
     data[key] = value
     with open(SETTINGS_PATH, "w") as f:
         json.dump(data, f, indent=2)
+
+
+def is_on_screen(geometry: str) -> bool:
+    """Return False if the top-left corner is likely off all connected monitors."""
+    m = re.match(r'\d+x\d+\+(-?\d+)\+(-?\d+)', geometry)
+    if not m:
+        return False
+    x, y = int(m.group(1)), int(m.group(2))
+    return x > -2000 and y > -2000

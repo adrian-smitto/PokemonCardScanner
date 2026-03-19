@@ -11,7 +11,7 @@ from core.state_machine import ScanStateMachine, ScanResult, PriceUpdate
 from core.scan_log import ScanLogger, ScanRecord
 from core.price_client import PriceClient, PriceResult
 from core.pricecharting_client import PriceChartingClient
-from core.roi import ROI, load_roi, save_roi, load_setting, save_setting
+from core.roi import ROI, load_roi, save_roi, load_setting, save_setting, is_on_screen
 from ui.feed_panel import FeedPanel
 from ui.result_panel import ResultPanel
 from ui.log_panel import LogPanel
@@ -50,6 +50,10 @@ class AppWindow:
         self._root.title("Pokemon Card Scanner")
         self._root.configure(bg="#121212")
         self._root.protocol("WM_DELETE_WINDOW", self._on_close)
+
+        geo = load_setting("main_geometry", None)
+        if geo and is_on_screen(geo):
+            self._root.geometry(geo)
 
         self._camera = CameraCapture()
         self._logger = ScanLogger()
@@ -427,6 +431,7 @@ class AppWindow:
             messagebox.showinfo("Export complete", f"Saved to:\n{path}")
 
     def _on_close(self) -> None:
+        save_setting("main_geometry", self._root.geometry())
         save_setting("zoom", self._current_zoom)
         save_setting("max_dist", config.MATCH_HAMMING_THRESHOLD)
         self._camera.stop()

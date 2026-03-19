@@ -7,6 +7,7 @@ from PIL import Image, ImageTk
 import config
 from core.price_client import PriceClient
 from core.scan_log import ScanLogger
+from core.roi import load_setting, save_setting, is_on_screen
 
 
 class ResolutionDialog(tk.Toplevel):
@@ -36,6 +37,11 @@ class ResolutionDialog(tk.Toplevel):
         # Retrieve scan_token for capture image lookup
         scan_row = logger.get_scan(scan_id)
         self._scan_token = scan_row["scan_token"] if scan_row else None
+
+        self.protocol("WM_DELETE_WINDOW", self._close)
+        geo = load_setting("resolution_geometry", None)
+        if geo and is_on_screen(geo):
+            self.geometry(geo)
 
         self._build()
         self.transient(parent)
@@ -117,7 +123,7 @@ class ResolutionDialog(tk.Toplevel):
                                       command=self._confirm, state="disabled")
         self._confirm_btn.pack(side="right", padx=(5, 0))
         tk.Button(btn_frame, text="Cancel", width=12,
-                  command=self.destroy).pack(side="right")
+                  command=self._close).pack(side="right")
 
         self._status_var = tk.StringVar(value="Select a card to confirm.")
         tk.Label(self, textvariable=self._status_var, fg="#888888",
@@ -179,6 +185,10 @@ class ResolutionDialog(tk.Toplevel):
         except Exception:
             self._selected_label.config(image="", text="No image", width=12, height=8)
 
+    def _close(self) -> None:
+        save_setting("resolution_geometry", self.geometry())
+        self.destroy()
+
     def _confirm(self) -> None:
         if not self._selected_candidate:
             return
@@ -212,4 +222,4 @@ class ResolutionDialog(tk.Toplevel):
             market_price=price.market_price,
         )
         self._executor.shutdown(wait=False)
-        self.destroy()
+        self._close()

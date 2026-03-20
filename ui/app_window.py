@@ -18,6 +18,8 @@ from ui.log_panel import LogPanel
 from ui.debug_log import DebugLog
 from ui.resolution_dialog import ResolutionDialog
 from ui.remap_dialog import RemapDialog
+from ui.snip_overlay import SnipOverlay
+from PIL import ImageGrab
 
 
 def _fetch_tcg_with_retry(price_client, card_id: str, max_retries: int = 3):
@@ -63,6 +65,7 @@ class AppWindow:
         self._state_machine: ScanStateMachine | None = None
         self._manual_price_futures: list = []
         self._bulk_pending: int = 0
+        self._snip_futures: list = []   # (future, scan_token)
 
         self._build_ui()
         self._startup()
@@ -135,6 +138,14 @@ class AppWindow:
                                     fg="#ffcc00", bg="#1e1e1e", font=("Helvetica", 9))
         # shown/hidden dynamically — not packed yet
 
+        shortcut_display = config.SNIP_HOTKEY.strip("<>").replace("-", "+")
+        self._snip_var = tk.StringVar(value=f"Snip: {shortcut_display}")
+        self._snip_label = tk.Label(
+            info_row, textvariable=self._snip_var,
+            fg="#888888", bg="#1e1e1e", font=("Helvetica", 8),
+        )
+        self._snip_label.pack(side="right", padx=(0, 10))
+
     def _startup(self) -> None:
         ok = self._camera.start()
         if self._current_zoom != 1.0:
@@ -159,6 +170,7 @@ class AppWindow:
             self._feed.set_roi_display(roi)
             self._debug.log("Scan area restored from settings", "dim")
 
+        self._root.bind(config.SNIP_HOTKEY, self._on_snip_hotkey)
         self._debug.log("Ready — press Enable Scanning to start", "info")
         self._root.after(config.UI_TICK_MS, self._tick)
 
@@ -178,6 +190,7 @@ class AppWindow:
                 self._feed.update_frame(frame)
 
         self._drain_manual_prices()
+        self._drain_snip_futures()
 
         while not self._state_machine.result_queue.empty():
             result: ScanResult = self._state_machine.result_queue.get_nowait()
@@ -193,9 +206,11 @@ class AppWindow:
         self._scanning = not self._scanning
         if self._scanning:
             self._scan_btn.config(text="⏹  Disable Scanning", bg="#1b5e20", fg="white")
+            self._snip_label.config(fg="#555555")
             self._debug.log("Scanning enabled", "success")
         else:
             self._scan_btn.config(text="▶  Enable Scanning", bg="#333333", fg="#aaaaaa")
+            self._snip_label.config(fg="#888888")
             self._debug.log("Scanning disabled", "dim")
 
     def _handle_result(self, result: ScanResult) -> None:
@@ -314,6 +329,106 @@ class AppWindow:
                     self._bulk_label.pack_forget()
             self._update_status()
         self._manual_price_futures = still_pending
+
+    def _on_snip_hotkey(self, _event=None) -> None:
+        if self._scanning or self._state_machine is None:
+            return
+        self._snip_var.set("Snipping…")
+        self._snip_label.config(fg="#ffcc00")
+        SnipOverlay(
+            self._root,
+            on_capture=self._on_snip_capture,
+            on_cancel=self._on_snip_cancel,
+        )
+
+    def _on_snip_cancel(self) -> None:
+        shortcut_display = config.SNIP_HOTKEY.strip("<>").replace("-", "+")
+        self._snip_var.set(f"Snip: {shortcut_display}")
+        self._snip_label.config(fg="#888888")
+
+    def _on_snip_capture(self, bbox: tuple) -> None:
+        shortcut_display = config.SNIP_HOTKEY.strip("<>").replace("-", "+")
+        self._snip_var.set(f"Snip: {shortcut_display}")
+        self._snip_label.config(fg="#888888")
+        try:
+            img = ImageGrab.grab(bbox=bbox, all_screens=True)
+            img = img.convert("RGB")
+        except Exception as e:
+            self._debug.log(f"Screen capture failed: {e}", "error")
+            return
+        scan_token = str(uuid.uuid4())
+        os.makedirs(config.CAPTURES_DIR, exist_ok=True)
+        try:
+            img.save(os.path.join(config.CAPTURES_DIR, f"{scan_token}.jpg"))
+        except Exception:
+            pass
+        future = self._executor.submit(
+            self._run_snip_match, img, self._state_machine.matcher
+        )
+        self._snip_futures.append((future, scan_token))
+
+    @staticmethod
+    def _run_snip_match(img, matcher):
+        from core.hasher import compute_phash
+        query_hash = compute_phash(img)
+        hash_180 = compute_phash(img.rotate(180))
+        return matcher.find_matches(query_hash, hash_180)
+
+    def _drain_snip_futures(self) -> None:
+        still_pending = []
+        for future, scan_token in self._snip_futures:
+            if not future.done():
+                still_pending.append((future, scan_token))
+                continue
+            try:
+                result = future.result()
+            except Exception:
+                result = None
+            self._handle_snip_result(result, scan_token)
+        self._snip_futures = still_pending
+
+    def _handle_snip_result(self, match_result, scan_token: str) -> None:
+        from core import audio
+        if match_result is None:
+            closest = self._state_machine.matcher.last_closest_dist
+            self._debug.log(
+                f"Snip: no match (closest dist={closest}) — logged as Unknown", "error"
+            )
+            audio.play_failure()
+            result = ScanResult(
+                scan_token=scan_token,
+                session_id=self._session_id,
+                card_id="", card_name="Unknown",
+                set_name="", number="", rarity=None,
+                market_price=None, low_price=None, high_price=None,
+                hamming_dist=closest if closest is not None else -1,
+                price_error=None, candidates=[],
+            )
+        else:
+            primary = match_result.primary
+            self._debug.log(
+                f"Snip matched: {primary.name} [{primary.set_name} #{primary.number}]"
+                f" dist={primary.hamming_dist}", "match"
+            )
+            audio.play_card_scanned()
+            candidates = [
+                {"card_id": c.card_id, "card_name": c.name, "set_name": c.set_name,
+                 "number": c.number, "rarity": c.rarity, "hamming_dist": c.hamming_dist}
+                for c in match_result.candidates
+            ]
+            result = ScanResult(
+                scan_token=scan_token,
+                session_id=self._session_id,
+                card_id=primary.card_id,
+                card_name=primary.name,
+                set_name=primary.set_name,
+                number=primary.number,
+                rarity=primary.rarity,
+                market_price=None, low_price=None, high_price=None,
+                hamming_dist=primary.hamming_dist,
+                price_error=None, candidates=candidates,
+            )
+        self._handle_result(result)
 
     def _on_remap(self, scan_id: int, scan_token: str | None, tree_index: int) -> None:
         if self._state_machine is None:

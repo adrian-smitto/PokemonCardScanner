@@ -51,6 +51,9 @@ IMAGES_DIR = "db/images"
 # Manual remap
 REMAP_TOP_N = 100   # default number of candidates shown in the remap dialog
 
+# Screen snip
+SNIP_HOTKEY = "<Control-Shift-S>"   # Tkinter key binding syntax
+
 # Pokemon TCG API
 POKEMONTCG_API_KEY = os.getenv("POKEMONTCG_API_KEY", "")
 POKEMONTCG_BASE_URL = "https://api.pokemontcg.io/v2"

@@ -7,5 +7,6 @@
   },
   "zoom": 1.5,
   "max_dist": 85,
-  "main_geometry": "765x916+3319+387"
+  "main_geometry": "765x916+3319+387",
+  "remap_geometry": "661x677+2860+465"
 }

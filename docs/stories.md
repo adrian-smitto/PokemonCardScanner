@@ -625,3 +625,59 @@
 - When the overlay is open and waiting for a drag, the status bar label updates to "Snipping…"
 - When the overlay closes (capture taken or Escape pressed), the label reverts to its normal state
 - No separate "Snip mode" button is required — the label is informational only
+
+---
+
+## E09 — Holo Type Tracking
+
+### E09-US01 — Display available price variants per scanned card
+**As a** collector who has both normal and reverse holo copies of cards,
+**I want** to see which price variants the TCGPlayer API has for each scanned card,
+**So that** I know whether I need to manually identify which variant I'm holding.
+
+**Acceptance criteria:**
+- A "Holo" column is added to the scan log panel, positioned between the Price and flags columns
+- When a card is scanned, the Holo cell initially shows "..." while the price fetch is in flight (same timing as the price column)
+- Once the price fetch returns, the Holo cell is populated with all variants the API reported for that card, abbreviated and joined with " · " (e.g. `normal · rev holo`, `holo · rev holo`, `holo`)
+- Variant abbreviations: `normal` → `normal`, `holofoil` → `holo`, `reverseHolofoil` → `rev holo`, `1stEditionHolofoil` → `1st ed holo`, `unlimitedHolofoil` → `unltd holo`
+- If the API returns only one variant, that variant is shown alone (no " · " separator)
+- If the price fetch fails or returns no variants, the Holo cell shows `N/A`
+- The selected/active variant (the one whose price is currently shown) is stored as `holo_type TEXT` in `scan_log.db`
+- The full list of available variants is stored as `holo_variants TEXT` (JSON array) in `scan_log.db` for use when setting holo type later without a round-trip
+- Both fields are included in CSV and JSON session exports
+- When a card is remapped to a different identity, the Holo cell and stored variants are reset and re-populated by the subsequent price fetch
+
+---
+
+### E09-US02 — Manually set holo type per row via right-click
+**As a** collector reviewing the scan log,
+**I want** to right-click a row and set the holo type to a specific variant,
+**So that** the price shown reflects the physical card I actually have.
+
+**Acceptance criteria:**
+- Right-clicking a log row shows a "Set Holo Type" option in the context menu
+- "Set Holo Type" opens a submenu listing only the variants available for that card (populated from the stored `holo_variants` list)
+- The submenu is not shown (or is greyed out) if `holo_variants` is empty or the price fetch has not yet completed
+- Selecting a variant triggers a fresh TCGPlayer price fetch for that specific variant
+- While re-fetching, the Price cell shows "..." and the Holo cell shows the chosen variant name (to indicate it is being applied)
+- On success: Price cell updates to the new price; Holo cell updates to show the selected variant; `holo_type` in the DB is updated
+- On failure: Price cell reverts to "N/A"; Holo cell shows `? [variant]` in a warning colour to indicate the price could not be retrieved
+- If a variant is forced but not found in the API response, the Holo cell shows `? [variant]` in a warning colour and the Price cell shows "N/A"
+- Setting a holo type does not affect the card identity (name, set, number) — only the price and holo_type fields
+
+---
+
+### E09-US03 — Batch holo mode for incoming scans
+**As a** collector scanning a stack of cards that are all the same variant (e.g. a reverse holo lot),
+**I want** to set a holo mode before scanning so every incoming card is automatically priced at that variant,
+**So that** I don't have to manually set the holo type on each row after the fact.
+
+**Acceptance criteria:**
+- A dropdown (Combobox) is added to the first row of the status bar, immediately before the "Enable Scanning" button
+- The dropdown options are: `Automatic`, `normal`, `holofoil`, `reverseHolofoil`, `1stEditionHolofoil`, `unlimitedHolofoil`
+- Default value on launch is `Automatic`
+- The selected holo mode applies to all incoming scans from both the camera and the screen snip feature
+- In `Automatic` mode: the price client uses its default variant priority order (`normal → holofoil → reverseHolofoil → …`); the Holo cell shows all available variants so the user can manually resolve each row
+- In any specific mode (e.g. `reverseHolofoil`): the price fetch targets that variant directly; if the variant exists, the Holo cell shows just that variant and the price reflects it; if the variant does not exist for a particular card, the Holo cell shows `? reverseHolofoil` in a warning colour and the price shows "N/A" — the user resolves it via right-click "Set Holo Type"
+- The holo mode setting is not persisted between sessions (resets to `Automatic` on launch) — it is a per-session workflow tool
+- Changing the dropdown mid-session only affects scans from that point forward; existing rows are unchanged

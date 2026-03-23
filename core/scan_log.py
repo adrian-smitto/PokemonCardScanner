@@ -21,6 +21,8 @@ class ScanRecord:
     id: int | None = None
     is_corrected: bool = False
     scan_token: str | None = None
+    holo_type: str | None = None
+    holo_variants: list = None
 
     def __post_init__(self):
         if not self.scanned_at:
@@ -41,7 +43,9 @@ CREATE TABLE IF NOT EXISTS scan_log (
     hamming_dist INTEGER NOT NULL,
     is_corrected INTEGER NOT NULL DEFAULT 0,
     scan_token   TEXT,
-    price_source TEXT
+    price_source TEXT,
+    holo_type    TEXT,
+    holo_variants TEXT
 );
 """
 
@@ -70,6 +74,8 @@ class ScanLogger:
         for migration in [
             "ALTER TABLE scan_log ADD COLUMN scan_token TEXT",
             "ALTER TABLE scan_log ADD COLUMN price_source TEXT",
+            "ALTER TABLE scan_log ADD COLUMN holo_type TEXT",
+            "ALTER TABLE scan_log ADD COLUMN holo_variants TEXT",
         ]:
             try:
                 self._conn.execute(migration)
@@ -132,6 +138,17 @@ class ScanLogger:
         )
         self._conn.commit()
 
+    def update_holo(self, scan_id: int,
+                    holo_type: str | None,
+                    holo_variants: list | None) -> None:
+        self._conn.execute(
+            "UPDATE scan_log SET holo_type=?, holo_variants=? WHERE id=?",
+            (holo_type,
+             json.dumps(holo_variants) if holo_variants is not None else None,
+             scan_id),
+        )
+        self._conn.commit()
+
     def resolve(self, scan_id: int, card_id: str, card_name: str, set_name: str,
                 number: str, rarity: str | None, market_price: float | None) -> None:
         """Update a scan entry with the user-selected correct card."""
@@ -153,7 +170,7 @@ class ScanLogger:
             writer.writerow([
                 "scanned_at", "session_id", "card_id", "card_name",
                 "set_name", "number", "rarity", "market_price",
-                "hamming_dist", "is_corrected",
+                "hamming_dist", "is_corrected", "holo_type", "holo_variants",
             ])
             for row in rows:
                 writer.writerow([
@@ -161,6 +178,7 @@ class ScanLogger:
                     row["card_name"], row["set_name"], row["number"],
                     row["rarity"], row["market_price"],
                     row["hamming_dist"], row["is_corrected"],
+                    row["holo_type"], row["holo_variants"],
                 ])
 
     def export_json(self, session_id: str, filepath: str) -> None:
@@ -168,6 +186,11 @@ class ScanLogger:
         data = [dict(row) for row in rows]
         with open(filepath, "w", encoding="utf-8") as f:
             json.dump({"version": 1, "scans": data}, f, indent=2)
+
+    def delete_scan(self, scan_id: int) -> None:
+        self._conn.execute("DELETE FROM scan_candidates WHERE scan_id = ?", (scan_id,))
+        self._conn.execute("DELETE FROM scan_log WHERE id = ?", (scan_id,))
+        self._conn.commit()
 
     def get_scan(self, scan_id: int) -> sqlite3.Row | None:
         return self._conn.execute(

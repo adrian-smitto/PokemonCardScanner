@@ -54,6 +54,8 @@ class PriceUpdate:
     high_price: float | None
     price_error: str | None
     price_source: str | None = None
+    price_variant: str | None = None
+    available_variants: list = None
 
 
 def _resolve_price(tcg: float | None, pc: float | None) -> tuple[float | None, str | None]:
@@ -93,6 +95,8 @@ class ScanStateMachine:
         self._pending_prices: dict = {}
         self._last_card_id: str | None = None   # suppress duplicate scans
         self._lost_frames: int = 0        # consecutive frames without a contour
+        self._holo_mode: str = "Automatic"
+        self._fetch_prices: bool = True
 
     @property
     def state(self) -> ScanState:
@@ -101,6 +105,22 @@ class ScanStateMachine:
     @property
     def matcher(self) -> CardMatcher:
         return self._matcher
+
+    @property
+    def holo_mode(self) -> str:
+        return self._holo_mode
+
+    @holo_mode.setter
+    def holo_mode(self, value: str) -> None:
+        self._holo_mode = value
+
+    @property
+    def fetch_prices(self) -> bool:
+        return self._fetch_prices
+
+    @fetch_prices.setter
+    def fetch_prices(self, value: bool) -> None:
+        self._fetch_prices = value
 
     def process(self, frame: np.ndarray) -> tuple[np.ndarray, np.ndarray | None]:
         """
@@ -310,21 +330,23 @@ class ScanStateMachine:
 
                     audio.play_card_scanned()
 
-                    # Kick off dual price fetch in background
-                    tcg_future = self._executor.submit(
-                        self._price_client.fetch_price, result.primary.card_id
-                    )
-                    pc_future = self._executor.submit(
-                        self._pc_client.fetch_price,
-                        result.primary.name, result.primary.set_name, result.primary.number,
-                    ) if self._pc_client else None
-                    self._pending_prices[scan_token] = {
-                        "tcg": tcg_future,
-                        "pc": pc_future,
-                        "card_name": result.primary.name,
-                        "set_name": result.primary.set_name,
-                        "number": result.primary.number,
-                    }
+                    # Kick off dual price fetch in background (if enabled)
+                    if self._fetch_prices:
+                        target = None if self._holo_mode == "Automatic" else self._holo_mode
+                        tcg_future = self._executor.submit(
+                            self._price_client.fetch_price, result.primary.card_id, target
+                        )
+                        pc_future = self._executor.submit(
+                            self._pc_client.fetch_price,
+                            result.primary.name, result.primary.set_name, result.primary.number,
+                        ) if self._pc_client else None
+                        self._pending_prices[scan_token] = {
+                            "tcg": tcg_future,
+                            "pc": pc_future,
+                            "card_name": result.primary.name,
+                            "set_name": result.primary.set_name,
+                            "number": result.primary.number,
+                        }
 
                     self._cooldown_start = time.monotonic()
                     self._cooldown_hash = self._stable_hashes[-1] if self._stable_hashes else None
@@ -400,6 +422,8 @@ class ScanStateMachine:
                 high_price=tcg_result.high_price,
                 price_error=tcg_result.error,
                 price_source=source,
+                price_variant=tcg_result.price_variant,
+                available_variants=tcg_result.available_variants or [],
             ))
         self._pending_prices = still_pending
 

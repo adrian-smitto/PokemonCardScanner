@@ -35,6 +35,7 @@ class RemapDialog:
         self._win.configure(bg="#1e1e1e")
         self._win.resizable(True, True)
         self._win.protocol("WM_DELETE_WINDOW", self._close)
+        self._win.bind("<Escape>", lambda _: self._close())
         self._win.grab_set()
 
         geo = load_setting("remap_geometry", None)
@@ -44,6 +45,7 @@ class RemapDialog:
         self._build()
         self._load_capture()
         self._load_candidates()
+        self._win.focus_set()
 
     def _build(self) -> None:
         # Top section: capture image + N control

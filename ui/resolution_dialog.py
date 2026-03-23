@@ -39,6 +39,7 @@ class ResolutionDialog(tk.Toplevel):
         self._scan_token = scan_row["scan_token"] if scan_row else None
 
         self.protocol("WM_DELETE_WINDOW", self._close)
+        self.bind("<Escape>", lambda _: self._close())
         geo = load_setting("resolution_geometry", None)
         if geo and is_on_screen(geo):
             self.geometry(geo)
@@ -47,6 +48,7 @@ class ResolutionDialog(tk.Toplevel):
         self.transient(parent)
         self.wait_visibility()
         self.grab_set()
+        self.focus_set()
 
     def _build(self) -> None:
         # ── Top: capture image + instructions ──────────────────────────────

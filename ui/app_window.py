@@ -9,7 +9,7 @@ import config
 from core.camera import CameraCapture
 from core.state_machine import ScanStateMachine, ScanResult, PriceUpdate
 from core.scan_log import ScanLogger, ScanRecord
-from core.price_client import PriceClient, PriceResult
+from core.price_client import PriceClient, PriceResult, VARIANT_ABBREV
 from core.pricecharting_client import PriceChartingClient
 from core.roi import ROI, load_roi, save_roi, load_setting, save_setting, is_on_screen
 from ui.feed_panel import FeedPanel
@@ -91,6 +91,8 @@ class AppWindow:
             on_get_price_tcg=self._on_get_price_tcg,
             on_get_price_pc=self._on_get_price_pc,
             on_remap=self._on_remap,
+            on_set_holo_type=self._on_set_holo_type,
+            on_delete=self._on_delete,
             bg="white",
         )
         self._log.pack(fill="both", expand=True, padx=10, pady=(0, 5))
@@ -105,6 +107,20 @@ class AppWindow:
         btn_row = tk.Frame(status_bar, bg="#1e1e1e")
         btn_row.pack(fill="x")
 
+        _HOLO_OPTIONS = ["Automatic", "normal", "holofoil",
+                         "reverseHolofoil", "1stEditionHolofoil", "unlimitedHolofoil"]
+        self._holo_mode_var = tk.StringVar(value="Automatic")
+        from tkinter import ttk as _ttk
+        _ttk.Combobox(
+            btn_row,
+            textvariable=self._holo_mode_var,
+            values=_HOLO_OPTIONS,
+            state="readonly",
+            width=14,
+            font=("Helvetica", 9),
+        ).pack(side="left", padx=(0, 6), pady=4)
+        self._holo_mode_var.trace_add("write", self._on_holo_mode_change)
+
         self._scanning = False
         self._scan_btn = tk.Button(
             btn_row, text="▶  Enable Scanning", width=18,
@@ -114,6 +130,15 @@ class AppWindow:
             command=self._toggle_scanning,
         )
         self._scan_btn.pack(side="left", padx=(0, 6), pady=4)
+
+        self._fetch_prices_var = tk.BooleanVar(value=True)
+        tk.Checkbutton(
+            btn_row, text="Fetch Prices",
+            variable=self._fetch_prices_var,
+            command=self._on_fetch_prices_change,
+            bg="#1e1e1e", fg="#aaaaaa", selectcolor="#333333",
+            activebackground="#1e1e1e", activeforeground="white",
+        ).pack(side="left", padx=(0, 10), pady=4)
 
         tk.Button(btn_row, text="Save Session", command=self._save_session,
                   font=("Helvetica", 9)).pack(side="left", padx=(0, 4), pady=4)
@@ -232,13 +257,65 @@ class AppWindow:
                          scan_token=result.scan_token)
         self._result.display(result)
 
-        if result.card_id:
-            # Known card — kick off background price fetch
+        if result.card_id and self._fetch_prices_var.get():
+            # Known card — price fetch was kicked off by state machine
             self._pending_price_map[result.scan_token] = (scan_id, tree_index)
 
         self._scan_count += 1
         self._unpriced_count += 1
         self._update_status()
+
+    def _on_delete(self, scan_id: int, tree_index: int) -> None:
+        # Read price before removing from DB so we can adjust totals
+        row = self._logger.get_scan(scan_id)
+        price = row["market_price"] if row else None
+
+        self._logger.delete_scan(scan_id)
+        self._log.delete_row(tree_index)
+
+        # Discard any pending price update for this row
+        self._pending_price_map = {
+            t: (sid, tidx) for t, (sid, tidx) in self._pending_price_map.items()
+            if sid != scan_id
+        }
+        # Fix up tree_indices for rows after the deleted one
+        self._pending_price_map = {
+            t: (sid, tidx - 1 if tidx > tree_index else tidx)
+            for t, (sid, tidx) in self._pending_price_map.items()
+        }
+        # Same fixup for manual price futures
+        updated = []
+        for entry in self._manual_price_futures:
+            tidx = entry[2]
+            updated.append(entry[:2] + (tidx - 1 if tidx > tree_index else tidx,) + entry[3:])
+        self._manual_price_futures = updated
+
+        # Adjust totals
+        self._scan_count -= 1
+        if price is not None:
+            self._total_value -= price
+        else:
+            self._unpriced_count = max(0, self._unpriced_count - 1)
+        self._update_status()
+
+    def _on_fetch_prices_change(self) -> None:
+        if self._state_machine:
+            self._state_machine.fetch_prices = self._fetch_prices_var.get()
+
+    def _on_holo_mode_change(self, *_) -> None:
+        if self._state_machine:
+            self._state_machine.holo_mode = self._holo_mode_var.get()
+
+    def _on_set_holo_type(self, scan_id: int, tree_index: int, variant: str) -> None:
+        row = self._logger.get_scan(scan_id)
+        if row is None:
+            return
+        self._log.update_price_loading(tree_index)
+        self._log.update_holo_loading(tree_index, variant)
+        future = self._executor.submit(
+            self._price_client.fetch_price, row["card_id"], variant
+        )
+        self._manual_price_futures.append((future, scan_id, tree_index, "tcg", False, variant))
 
     def _handle_price_update(self, update: PriceUpdate) -> None:
         entry = self._pending_price_map.pop(update.scan_token, None)
@@ -248,6 +325,11 @@ class AppWindow:
 
         self._logger.update_price(scan_id, update.market_price, update.price_source)
         self._log.update_price(tree_index, update.market_price, update.price_source)
+
+        self._logger.update_holo(scan_id, update.price_variant, update.available_variants or [])
+        forced_variant = self._holo_mode_var.get() if self._holo_mode_var.get() != "Automatic" else None
+        self._log.update_holo(tree_index, update.price_variant, update.available_variants or [],
+                               forced_variant=forced_variant)
 
         self._unpriced_count -= 1
         if update.market_price is not None:
@@ -305,6 +387,7 @@ class AppWindow:
         for entry in self._manual_price_futures:
             future, scan_id, tree_index, source = entry[0], entry[1], entry[2], entry[3]
             is_bulk = entry[4] if len(entry) > 4 else False
+            target_variant = entry[5] if len(entry) > 5 else None
             if not future.done():
                 still_pending.append(entry)
                 continue
@@ -318,6 +401,12 @@ class AppWindow:
                 market_price = result.loose_price if (result and result.available) else None
             self._logger.update_price(scan_id, market_price, source)
             self._log.update_price(tree_index, market_price, source)
+            if source == "tcg" and result is not None:
+                price_variant = result.price_variant
+                avail_variants = result.available_variants or []
+                self._logger.update_holo(scan_id, price_variant, avail_variants)
+                self._log.update_holo(tree_index, price_variant, avail_variants,
+                                      forced_variant=target_variant)
             if market_price is not None:
                 self._total_value += market_price
                 self._unpriced_count = max(0, self._unpriced_count - 1)
